@@ -42,7 +42,9 @@ DEFAULT_DATA = {
         "brief":"",
         "candidate":"",
         "audit":"",
+        "audit_digest":{},
         "revised":"",
+        "revision_note":"",
         "revision_approved":False,
         "reaudit":"",
         "locked":False,
@@ -363,6 +365,52 @@ def build_bible_from_locked_concept(api_key, model, data):
         f"""잠금된 기획:\n{locked}\n\n작가실 규칙:\n{rules}\n\n다음 JSON 스키마로 구조화하라.\n{{\n  \"meta\": {{\"title\":\"제목\",\"genre\":\"장르\",\"format\":\"숏폼 {total}부작, 회당 분량\",\"tone\":\"톤과 문체\",\"premise\":\"공개 가능한 기본 설정/로그라인\",\"final_truth\":\"작가만 아는 전체 진실\",\"episode_count\":{total}}},\n  \"characters\": [{{\"name\":\"이름\",\"age\":35,\"birth_year\":null,\"role\":\"역할\",\"biological_mother\":\"\",\"biological_father\":\"\",\"raised_by\":\"\",\"secret\":\"숨기는 사실\",\"desire\":\"욕망/목표\"}}],\n  \"relationships\": [{{\"a\":\"인물A\",\"b\":\"인물B\",\"type\":\"관계\",\"detail\":\"설명\"}}],\n  \"timeline\": [{{\"year\":\"시점 또는 연도\",\"event\":\"사건\",\"person\":\"관련 인물\",\"known_by\":\"현재 알고 있는 인물\"}}],\n  \"foreshadowing\": [{{\"clue\":\"떡밥\",\"planted_episode\":1,\"payoff_episode\":5,\"truth\":\"실제 의미\",\"status\":\"미회수\"}}],\n  \"knowledge\": [{{\"person\":\"인물\",\"fact\":\"본편 시작 전에 이미 아는 사실\",\"learned_episode\":0,\"source\":\"알게 된 이유\"}}]\n}}\n잠금 기획에 없는 구체적 혈연/법률관계를 임의 생성하지 마라. final_truth에는 잠금 기획의 정답을 빠뜨리지 마라. premise에는 최종 반전을 노출하지 마라.""")
     return normalize_bible_payload(extract_json(raw), total)
 
+def build_audit_digest(api_key, model, audit_text):
+    """긴 레드팀 보고서를 사용자가 빠르게 판단할 수 있는 JSON 요약으로 변환한다."""
+    raw = call_model(
+        api_key, model,
+        """당신은 드라마 기획 검수 보고서 편집자다. 원문에 없는 문제를 새로 만들지 않는다.
+출력은 설명 없이 유효한 JSON 객체 하나만 반환한다.""",
+        f"""다음 공격검증 보고서를 짧게 구조화하라.
+
+{audit_text}
+
+스키마:
+{{
+  "verdict":"PASS|REVISE|REJECT|UNKNOWN",
+  "critical_count":0,
+  "important_count":0,
+  "minor_count":0,
+  "issues":[
+    {{"severity":"치명적|중요|경미","title":"15자 안팎 제목","problem":"한두 문장","fix_direction":"한 문장","external_check":false}}
+  ]
+}}
+규칙: issues는 가장 중요한 것부터 최대 8개. 법률/제도 등 외부 확인이 필요하면 external_check=true."""
+    )
+    obj = extract_json(raw)
+    return obj if isinstance(obj, dict) else {}
+
+
+def render_audit_digest(digest):
+    if not isinstance(digest, dict) or not digest:
+        return
+    verdict = str(digest.get("verdict", "UNKNOWN"))
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("판정", verdict)
+    c2.metric("🔴 치명적", int(digest.get("critical_count", 0) or 0))
+    c3.metric("🟠 중요", int(digest.get("important_count", 0) or 0))
+    c4.metric("🟡 경미", int(digest.get("minor_count", 0) or 0))
+    for i, issue in enumerate(digest.get("issues", [])[:8], 1):
+        sev = issue.get("severity", "중요")
+        icon = {"치명적":"🔴", "중요":"🟠", "경미":"🟡"}.get(sev, "⚪")
+        ext = " · 외부 확인 필요" if issue.get("external_check") else ""
+        with st.expander(f"{icon} {i}. {issue.get('title','문제')} ({sev}{ext})"):
+            st.write(issue.get("problem", ""))
+            if issue.get("fix_direction"):
+                st.caption("수정 방향")
+                st.write(issue.get("fix_direction"))
+
+
 def creative_controls_text(data):
     c = data.get("creative_controls", {})
     return (f"막장도 {c.get('makjang',8)}/10, 반전 강도 {c.get('twist',8)}/10, "
@@ -374,7 +422,7 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🎬 AI 드라마 작가실 2.3")
+st.title("🎬 AI 드라마 작가실 2.4")
 st.caption("한 줄 아이디어 → 재미/현실성 조절 → 레드팀 → 사용자 승인 → Canon 잠금 → 시즌/대본")
 
 if "data" not in st.session_state:
@@ -501,6 +549,7 @@ with tabs[0]:
 아직 '확정'이라고 부르지 마라."""
             )
             lab["audit"] = ""
+            lab["audit_digest"] = {}
             lab["revised"] = ""
             lab["revision_approved"] = False
             lab["reaudit"] = ""
@@ -543,13 +592,24 @@ with tabs[0]:
 10. 외부 사실 확인이 필요한 주장
 마지막에 PASS / REVISE / REJECT 중 하나와 이유를 적어라."""
             )
+            try:
+                lab["audit_digest"] = build_audit_digest(api_key, model, lab["audit"])
+            except Exception:
+                lab["audit_digest"] = {}
             save_data(data)
             st.rerun()
 
     if lab.get("audit"):
-        st.markdown("### 공격검증 결과")
-        st.write(lab["audit"])
-        if st.button("③ 수정 제안 만들기", use_container_width=True):
+        st.markdown("### 공격검증 요약")
+        render_audit_digest(lab.get("audit_digest", {}))
+        with st.expander("전체 공격검증 보고서 보기"):
+            st.write(lab["audit"])
+        lab["revision_note"] = st.text_area(
+            "수정 제안에 반영할 내 지시 (선택)",
+            lab.get("revision_note", ""),
+            placeholder="예: 핵심 불륜 관계는 유지. 기업 지분 숫자는 만들지 말 것. 감정 갈등을 더 세게."
+        )
+        if st.button("③ AI 수정 제안 보기", use_container_width=True):
             rules = json.dumps(data["writer_rules"], ensure_ascii=False, indent=2)
             lab["revised"] = call_model(
                 api_key, model,
@@ -571,6 +631,9 @@ with tabs[0]:
 
 작품 성향:
 {creative_controls_text(data)}
+
+사용자 추가 지시:
+{lab.get('revision_note','') or '없음'}
 
 다음 형식으로 작성하라:
 1) 유지되는 핵심 설정
@@ -1332,4 +1395,4 @@ with tabs[10]:
             )
             st.write(result)
 
-st.caption("AI 드라마 작가실 2.3 · 검증을 통과한 설정만 잠그고 집필합니다. · project.json 저장")
+st.caption("AI 드라마 작가실 2.4 · 검증 결과를 요약하고 사용자 승인 후 Canon으로 잠급니다. · project.json 저장")
