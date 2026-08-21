@@ -63,7 +63,7 @@ DEFAULT_DATA = {
     "season_audit": "",
     "season_repair_round": 0,
     "season_repair_history": [],
-    "season_repair_engine_version": "2.8.3",
+    "season_repair_engine_version": "2.8.4",
     "season_repair_resolved": []
 }
 
@@ -106,11 +106,11 @@ def migrate_data(raw):
     if not isinstance(base.get("season_repair_resolved"), list):
         base["season_repair_resolved"] = []
     # 2.8.3: 보완 엔진이 바뀌면 횟수만 새 세션으로 초기화한다. 과거 이력은 보존한다.
-    if base.get("season_repair_engine_version") != "2.8.3":
+    if base.get("season_repair_engine_version") != "2.8.4":
         base["season_repair_round"] = 0
         base["season_repair_resolved"] = []
         base.pop("season_last_repair_rejection", None)
-        base["season_repair_engine_version"] = "2.8.3"
+        base["season_repair_engine_version"] = "2.8.4"
     return base
 
 
@@ -333,45 +333,12 @@ def deterministic_audit(data):
 
 
 def deterministic_repair_project_data(data):
-    """2.8.3: AI 없이 안전하게 고칠 수 있는 구조 오류만 정리한다.
+    """2.8.4: AI 없이 안전하게 고칠 수 있는 허용 영역의 구조 오류만 정리한다.
     Canon 의미를 추론하지 않고, 명백한 무효값/스키마 오류만 보정한다.
     """
     changes = []
 
-    # 인물: 빈 이름 제거, age/birth_year의 0/음수만 미확정(None)으로 정리.
-    cleaned_chars = []
-    for c in data.get("characters", []):
-        if not isinstance(c, dict):
-            changes.append("인물표의 비객체 행 제거")
-            continue
-        name = str(c.get("name", "")).strip()
-        if not name:
-            changes.append("이름 없는 인물 행 제거")
-            continue
-        row = dict(c)
-        for key in ("age", "birth_year"):
-            val = row.get(key)
-            if isinstance(val, (int, float)) and val <= 0:
-                row[key] = None
-                changes.append(f"{name}.{key}: {val} → null")
-        cleaned_chars.append(row)
-    data["characters"] = cleaned_chars
-
-    # 관계: 빈 행/자기 자신 관계는 명백한 구조 오류이므로 제거한다.
-    cleaned_rel = []
-    for r in data.get("relationships", []):
-        if not isinstance(r, dict):
-            changes.append("관계표의 비객체 행 제거")
-            continue
-        a, b = str(r.get("a", "")).strip(), str(r.get("b", "")).strip()
-        if not a or not b:
-            changes.append("주체가 비어 있는 관계 행 제거")
-            continue
-        if a == b:
-            changes.append(f"자기 자신 관계 제거: {a}")
-            continue
-        cleaned_rel.append(r)
-    data["relationships"] = cleaned_rel
+    # 2.8.4: characters / relationships는 Canon 잠금 영역이므로 여기서 절대 수정하지 않는다.
 
     # 연표: known_by는 문자열 또는 문자열 배열만 허용. 그 외는 빈 값으로 정규화.
     for e in data.get("timeline", []):
@@ -638,7 +605,7 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🎬 AI 드라마 작가실 2.8.3")
+st.title("🎬 AI 드라마 작가실 2.8.4")
 st.caption("한 줄 아이디어 → 재미/현실성 조절 → 레드팀 → 사용자 승인 → Canon 잠금 → 시즌/대본")
 
 if "data" not in st.session_state:
@@ -1534,6 +1501,20 @@ with tabs[8]:
                             "knowledge": json.loads(json.dumps(data.get("knowledge", []), ensure_ascii=False)),
                         }
 
+                        # 2.8.4 Canon firewall: 잠금 Canon에서 구조 스냅샷을 만들고 핵심 영역을 매 보완 전에 복원한다.
+                        # 기존 2.8.3 과정에서 인물표가 오염되었어도 잠금 Canon을 기준으로 되돌릴 수 있다.
+                        canon_snapshot = data.get("canon_struct_snapshot")
+                        if not isinstance(canon_snapshot, dict) or not canon_snapshot.get("characters"):
+                            try:
+                                canon_snapshot = build_bible_from_locked_concept(api_key, model, data)
+                                data["canon_struct_snapshot"] = json.loads(json.dumps(canon_snapshot, ensure_ascii=False))
+                            except Exception:
+                                canon_snapshot = None
+                        if isinstance(canon_snapshot, dict):
+                            for protected_key in ("meta", "characters", "relationships", "foreshadowing"):
+                                if protected_key in canon_snapshot:
+                                    data[protected_key] = json.loads(json.dumps(canon_snapshot[protected_key], ensure_ascii=False))
+
                         with st.status("구조 오류와 서사 오류를 분리해 보정하고 있습니다.", expanded=True) as status:
                             raw_patch = ""
                             narrative_guard = ""
@@ -1588,19 +1569,16 @@ with tabs[8]:
 # 구조 지적
 {json.dumps(structural_issues, ensure_ascii=False, indent=2)}
 
-# 현재 구조 데이터
-characters={json.dumps(data.get('characters', []), ensure_ascii=False)}
-relationships={json.dumps(data.get('relationships', []), ensure_ascii=False)}
+# 현재 구조 데이터 (수정 허용 영역만 제공)
 timeline={json.dumps(data.get('timeline', []), ensure_ascii=False)}
 knowledge={json.dumps(data.get('knowledge', []), ensure_ascii=False)}
-foreshadowing={json.dumps(data.get('foreshadowing', []), ensure_ascii=False)}
 
 출력:
-{{"edits":[{{"table":"characters|relationships|timeline|knowledge|foreshadowing","index":0,"field":"기존필드","value":null,"reason":"Canon 근거"}}]}}"""
+{{"edits":[{{"table":"timeline|knowledge","index":0,"field":"기존필드","value":null,"reason":"Canon 근거"}}]}}"""
                                     )
                                     sobj = extract_json(structure_raw)
                                     sedits = sobj.get("edits", []) if isinstance(sobj, dict) else []
-                                    tables = {"characters", "relationships", "timeline", "knowledge", "foreshadowing"}
+                                    tables = {"timeline", "knowledge"}
                                     for ed in sedits if isinstance(sedits, list) else []:
                                         if not isinstance(ed, dict):
                                             continue
@@ -1710,11 +1688,22 @@ foreshadowing={json.dumps(data.get('foreshadowing', []), ensure_ascii=False)}
                                             data["season_last_repair_rejection"] = {
                                                 "at": datetime.now().isoformat(timespec="seconds"),
                                                 "first_guard": narrative_guard,
-                                                "second_guard": "2.8.3은 거부된 서사 패치만 폐기하고 안전한 구조 보정은 유지합니다."
+                                                "second_guard": "2.8.4는 Canon 잠금 영역을 원본 스냅샷으로 복원하고, 허용 영역 외 변경은 폐기합니다."
                                             }
                                             status.write("서사 패치는 거부됐지만 안전한 구조 보정은 유지합니다.")
 
-                                any_change = bool(deterministic_changes or structure_ai_changes or narrative_applied)
+                                # 2.8.4 하드 방화벽: AI 호출 뒤에도 보호 영역이 Canon 스냅샷과 한 글자라도 다르면 즉시 복원한다.
+                                firewall_restored = []
+                                if isinstance(canon_snapshot, dict):
+                                    for protected_key in ("meta", "characters", "relationships", "foreshadowing"):
+                                        canonical_value = canon_snapshot.get(protected_key)
+                                        if canonical_value is not None and data.get(protected_key) != canonical_value:
+                                            data[protected_key] = json.loads(json.dumps(canonical_value, ensure_ascii=False))
+                                            firewall_restored.append(protected_key)
+                                    if firewall_restored:
+                                        status.write("Canon 방화벽이 보호 영역 변경을 롤백했습니다: " + ", ".join(firewall_restored))
+
+                                any_change = bool(deterministic_changes or structure_ai_changes or narrative_applied or firewall_restored)
                                 if not any_change:
                                     raise ValueError("안전하게 채택할 수 있는 실제 변경이 없습니다.")
 
@@ -1756,9 +1745,9 @@ foreshadowing={json.dumps(data.get('foreshadowing', []), ensure_ascii=False)}
                                         resolved.append(summary)
 
                                 data["season_repair_round"] = repair_round + 1
-                                data["season_repair_engine_version"] = "2.8.3"
+                                data["season_repair_engine_version"] = "2.8.4"
                                 data.setdefault("season_repair_history", []).append({
-                                    "engine": "2.8.3",
+                                    "engine": "2.8.4",
                                     "round": repair_round + 1,
                                     "at": datetime.now().isoformat(timespec="seconds"),
                                     "audit_before": audit_before,
@@ -1767,6 +1756,7 @@ foreshadowing={json.dumps(data.get('foreshadowing', []), ensure_ascii=False)}
                                     "narrative_issues": narrative_issues,
                                     "deterministic_changes": deterministic_changes,
                                     "structure_ai_changes": structure_ai_changes,
+                                    "canon_firewall_restored": firewall_restored,
                                     "changed_episodes": sorted(changed_episodes),
                                     "changed_fields": changed_fields,
                                     "change_summary": patch.get("change_summary", []) if isinstance(patch, dict) else [],
@@ -2078,4 +2068,4 @@ with tabs[10]:
             )
             st.write(result)
 
-st.caption("AI 드라마 작가실 2.8.3 · 구조 오류는 안전 규칙으로 직접 보정하고, 서사 오류만 AI가 필드 단위로 국소 수정합니다. · project.json 저장")
+st.caption("AI 드라마 작가실 2.8.4 · Canon 인물/관계/핵심 설정은 불변 잠금하고, 시즌·연표·정보 흐름의 허용 영역만 국소 보정합니다. · project.json 저장")
