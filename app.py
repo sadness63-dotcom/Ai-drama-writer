@@ -60,7 +60,9 @@ DEFAULT_DATA = {
         "locked_at":""
     },
     "season_locked": False,
-    "season_audit": ""
+    "season_audit": "",
+    "season_repair_round": 0,
+    "season_repair_history": []
 }
 
 
@@ -95,6 +97,10 @@ def migrate_data(raw):
     if not isinstance(base.get("season_locked"), bool):
         base["season_locked"] = False
     base.setdefault("season_audit", "")
+    if not isinstance(base.get("season_repair_round"), int):
+        base["season_repair_round"] = 0
+    if not isinstance(base.get("season_repair_history"), list):
+        base["season_repair_history"] = []
     return base
 
 
@@ -504,7 +510,7 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🎬 AI 드라마 작가실 2.7")
+st.title("🎬 AI 드라마 작가실 2.8")
 st.caption("한 줄 아이디어 → 재미/현실성 조절 → 레드팀 → 사용자 승인 → Canon 잠금 → 시즌/대본")
 
 if "data" not in st.session_state:
@@ -1304,6 +1310,10 @@ with tabs[8]:
                             "내용을 확인한 뒤 필요하면 다시 설계하세요."
                         )
                     data["season_plan"] = plan
+                    data["season_repair_round"] = 0
+                    data["season_repair_history"] = []
+                    data["season_audit"] = ""
+                    data["season_locked"] = False
                     save_data(data)
                     status.update(label="전체 시즌 설계 완료", state="complete")
                     st.success("전체 시즌 설계를 저장했습니다.")
@@ -1370,6 +1380,150 @@ with tabs[8]:
                     st.success("시즌 구조가 잠겼습니다. 이제 회차 집필이 가능합니다.")
             else:
                 st.warning("시즌 구조에 수정이 필요합니다.")
+
+                max_repairs = 5
+                repair_round = int(data.get("season_repair_round", 0) or 0)
+                st.caption(f"국소 보완 {repair_round}/{max_repairs}회 · 잠금 Canon 및 통과 구조 보존 모드")
+
+                if repair_round < max_repairs and st.button(
+                    "🔧 지적사항만 자동 보완 → 재검증",
+                    type="primary",
+                    use_container_width=True,
+                    key="season_local_repair"
+                ):
+                    if not api_key:
+                        st.error("사이드바에 OpenAI API Key를 입력하세요.")
+                    else:
+                        before_plan = json.loads(json.dumps(data["season_plan"], ensure_ascii=False))
+                        audit_before = data["season_audit"]
+                        ctx = compact_context(data, last_episode_count=0)
+
+                        with st.status("REVISE 지적사항만 국소 보완하고 있습니다.", expanded=True) as status:
+                            raw_patch = call_model(
+                                api_key, model,
+                                """당신은 드라마 시즌 설계의 국소 패치 담당 수석 작가다.
+잠금 Story Bible/Canon은 절대 수정하지 않는다.
+현재 감사에서 지적된 문제만 고친다. 이미 통과한 사건, 반전, 관계, 친자, 사망, 범인, 결말은 보존한다.
+새 인물·새 사망·새 친자관계·새 범인·새 핵심 반전을 추가하지 않는다.
+외부 확인 필요 사실은 법률·제도적으로 단정하지 않는다.
+가능하면 기존 문장을 유지하고 필요한 회차/필드만 최소 수정한다.
+출력은 설명 없이 오직 유효한 JSON 객체 하나만 반환한다.""",
+                                f"""{ctx}
+
+# 현재 시즌 구조 검증의 REVISE 지적사항
+{audit_before}
+
+# 작업
+위 지적사항만 해결하라. 시즌 전체를 새로 쓰지 마라.
+반드시 정확히 {total}개 회차를 유지하라.
+
+출력 형식:
+{{
+  "season_plan": [기존과 동일한 스키마의 {total}개 회차 객체],
+  "changed_episodes": [실제로 수정한 회차 번호],
+  "change_summary": ["지적 → 최소 수정 → 이유"],
+  "canon_guard": "잠금 Canon을 변경하지 않았다는 짧은 확인"
+}}"""
+                            )
+
+                            try:
+                                patch = extract_json(raw_patch)
+                                candidate = patch.get("season_plan") if isinstance(patch, dict) else None
+                                if not isinstance(candidate, list):
+                                    raise ValueError("보완 결과에 season_plan 배열이 없습니다.")
+                                candidate = [x for x in candidate if isinstance(x, dict)]
+                                candidate.sort(key=lambda x: int(x.get("number", 0) or 0))
+                                nums = [int(x.get("number", 0) or 0) for x in candidate]
+                                if len(candidate) != total or nums != list(range(1, total + 1)):
+                                    raise ValueError(f"회차 수/번호가 잘못되었습니다: {nums}")
+
+                                # 1차 방어: 모델에게 잠금 Canon 침해와 불필요한 대수술을 독립 검사시킨다.
+                                guard_raw = call_model(
+                                    api_key, model,
+                                    """당신은 Canon 변경 방지 감사관이다. 후보 수정안을 승인하거나 거부한다.
+잠금 Canon은 절대 변경할 수 없다. 새 인물·새 사망·새 친자관계·새 범인·새 핵심 반전 추가를 금지한다.
+REVISE 지적과 무관한 통과 구조를 바꾸는 대수술도 금지한다.
+외부 확인 필요 전문 사실을 확정 사실로 바꾸는 것도 금지한다.
+마지막 줄은 반드시 GUARD: PASS 또는 GUARD: REJECT.""",
+                                    f"""# 잠금 Canon/Story Bible
+{data.get('concept_lab', {}).get('locked_bible', '')}
+
+# 기존 시즌 설계
+{json.dumps(before_plan, ensure_ascii=False, indent=2)}
+
+# REVISE 지적사항
+{audit_before}
+
+# 후보 국소 수정안
+{json.dumps(candidate, ensure_ascii=False, indent=2)}
+
+지적 해결에 필요한 최소 변경인지 독립 검사하라."""
+                                )
+                                if "GUARD: PASS" not in guard_raw.upper():
+                                    raise ValueError("Canon 보호 검사에서 수정안이 거부되었습니다.\n\n" + guard_raw)
+
+                                # 후보를 임시 반영한 뒤 전체 연속성을 다시 검사한다.
+                                data["season_plan"] = candidate
+                                rectx = compact_context(data, last_episode_count=0)
+                                reaudit = call_model(
+                                    api_key, model,
+                                    """당신은 시즌 전체 continuity 시뮬레이터다.
+각 화를 순서대로 실행한다고 가정해 상태 변화를 추적한다.
+칭찬하지 말고 모순을 찾는다. 확정 Story Bible은 변경할 수 없는 사실이다.""",
+                                    f"""{rectx}
+
+1화부터 마지막 화까지 다시 순서대로 시뮬레이션하여 검사:
+- 원인 없는 결과
+- 인물이 알기 전에 사용하는 정보
+- 이미 안 사실을 다시 처음 아는 장면
+- 심지 않은 떡밥의 회수
+- 회수 예정인데 사라진 떡밥
+- 최종 반전의 사전 단서 부족
+- 잠금 Story Bible과 충돌
+- 시간/이동/나이 모순
+- 인물의 합리적인 대안 행동을 무시한 억지 전개
+- 외부 확인 필요 사실을 확정 법률·제도 사실처럼 단정하는지
+
+마지막 줄은 반드시 VERDICT: PASS 또는 VERDICT: REVISE."""
+                                )
+
+                                data["season_repair_round"] = repair_round + 1
+                                data.setdefault("season_repair_history", []).append({
+                                    "round": repair_round + 1,
+                                    "at": datetime.now().isoformat(timespec="seconds"),
+                                    "audit_before": audit_before,
+                                    "changed_episodes": patch.get("changed_episodes", []),
+                                    "change_summary": patch.get("change_summary", []),
+                                    "guard": guard_raw,
+                                    "audit_after": reaudit,
+                                    "before_plan": before_plan,
+                                    "after_plan": candidate
+                                })
+                                data["season_audit"] = reaudit
+                                data["season_locked"] = False
+                                save_data(data)
+                                status.update(label="국소 보완 및 독립 재검증 완료", state="complete")
+                                st.rerun()
+                            except Exception as e:
+                                data["season_plan"] = before_plan
+                                save_data(data)
+                                status.update(label="국소 보완안을 채택하지 않았습니다.", state="error")
+                                st.error(f"보완 실패: {e}")
+                                with st.expander("보완 AI 원문 보기"):
+                                    st.write(raw_patch)
+                elif repair_round >= max_repairs:
+                    st.error("자동 국소 보완 5회를 모두 사용했습니다. 남은 문제는 직접 확인한 뒤 시즌 설계를 수정하세요.")
+
+        if data.get("season_repair_history"):
+            with st.expander("🧾 시즌 보완 이력 보기"):
+                for h in reversed(data["season_repair_history"]):
+                    st.markdown(f"**{h.get('round')}차 보완 · {h.get('at','')}**")
+                    changed = h.get("changed_episodes", [])
+                    st.write(f"수정 회차: {', '.join(map(str, changed)) if changed else 'AI 보고 없음'}")
+                    for item in h.get("change_summary", []):
+                        st.write(f"- {item}")
+                    with st.expander(f"{h.get('round')}차 재검증 결과"):
+                        st.write(h.get("audit_after", ""))
 
 # 8. 회차 집필
 with tabs[9]:
@@ -1629,4 +1783,4 @@ with tabs[10]:
             )
             st.write(result)
 
-st.caption("AI 드라마 작가실 2.7 · 검증 이력과 최종 Canon을 분리하고, 정제된 Canon만 Story Bible과 집필 기준으로 사용합니다. · project.json 저장")
+st.caption("AI 드라마 작가실 2.8 · 검증 이력과 최종 Canon을 분리하고, 정제된 Canon만 Story Bible과 집필 기준으로 사용합니다. · project.json 저장")
