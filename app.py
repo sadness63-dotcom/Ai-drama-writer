@@ -432,7 +432,7 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🎬 AI 드라마 작가실 2.5")
+st.title("🎬 AI 드라마 작가실 2.6")
 st.caption("한 줄 아이디어 → 재미/현실성 조절 → 레드팀 → 사용자 승인 → Canon 잠금 → 시즌/대본")
 
 if "data" not in st.session_state:
@@ -674,8 +674,12 @@ with tabs[0]:
         st.markdown("### AI 수정 제안 — 아직 확정 아님")
         st.warning("아래 내용은 AI 제안입니다. 승인 전에는 Story Bible이나 Canon에 반영되지 않습니다.")
         st.write(lab["revised"])
+        # 2.6: 국소 보완 뒤에는 다음 행동을 명시적으로 보여준다.
+        if int(lab.get("refine_round", 0)) > 0 and not lab.get("revision_approved", False):
+            st.info(f"🔄 {lab.get('refine_round',0)}차 국소 보완이 끝났습니다. 보완안을 승인한 뒤 독립 재검증을 다시 실행하세요.")
         c_yes, c_no = st.columns(2)
-        if c_yes.button("✅ 이 수정안을 승인하고 재검증", use_container_width=True):
+        approve_label = "🔄 보완안 승인하고 독립 재검증" if int(lab.get("refine_round", 0)) > 0 else "✅ 이 수정안을 승인하고 재검증"
+        if c_yes.button(approve_label, use_container_width=True):
             lab["revision_approved"] = True
             rules = json.dumps(data["writer_rules"], ensure_ascii=False, indent=2)
             lab["reaudit"] = call_model(
@@ -784,6 +788,8 @@ with tabs[0]:
                     lab["revision_approved"] = False
                     lab["reaudit"] = ""
                     lab["conditional_canon"] = False
+                    # 2.6: refined text becomes a fresh Canon candidate; user must explicitly approve it
+                    # and the same independent red-team audit is run again from the revised candidate.
                     save_data(data)
                     st.rerun()
 
@@ -1507,4 +1513,4 @@ with tabs[10]:
             )
             st.write(result)
 
-st.caption("AI 드라마 작가실 2.5 · 재검증 실패 항목만 보완하고, 외부 확인 항목은 조건부 Canon으로 관리합니다. · project.json 저장")
+st.caption("AI 드라마 작가실 2.6 · 국소 보완안도 다시 승인·독립 재검증한 뒤 Canon으로 잠급니다. · project.json 저장")
