@@ -510,7 +510,7 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🎬 AI 드라마 작가실 2.8.1")
+st.title("🎬 AI 드라마 작가실 2.8.2")
 st.caption("한 줄 아이디어 → 재미/현실성 조절 → 레드팀 → 사용자 승인 → Canon 잠금 → 시즌/대본")
 
 if "data" not in st.session_state:
@@ -1398,171 +1398,166 @@ with tabs[8]:
                         audit_before = data["season_audit"]
                         ctx = compact_context(data, last_episode_count=0)
 
-                        with st.status("REVISE 지적사항만 국소 보완하고 있습니다.", expanded=True) as status:
-                            raw_patch = call_model(
-                                api_key, model,
-                                """당신은 드라마 시즌 설계의 국소 패치 담당 수석 작가다.
-잠금 Story Bible/Canon은 절대 수정하지 않는다.
-현재 감사에서 지적된 문제만 고친다. 이미 통과한 사건, 반전, 관계, 친자, 사망, 범인, 결말은 보존한다.
-새 인물·새 사망·새 친자관계·새 범인·새 핵심 반전을 추가하지 않는다.
-외부 확인 필요 사실은 법률·제도적으로 단정하지 않는다.
-가능하면 기존 문장을 유지하고 필요한 회차/필드만 최소 수정한다.
-출력은 설명 없이 오직 유효한 JSON 객체 하나만 반환한다.""",
-                                f"""{ctx}
+                        with st.status("REVISE 지적을 회차/필드 단위로 분해하고 있습니다.", expanded=True) as status:
+                            raw_patch = ""
+                            try:
+                                # 2.8.2 핵심: 시즌 전체를 다시 쓰게 하지 않는다.
+                                # 감사 지적을 먼저 구조화하고, 실제 수정은 기존 회차의 기존 필드에 대한 patch op만 받는다.
+                                issue_raw = call_model(
+                                    api_key, model,
+                                    """당신은 시즌 연속성 감사 보고서를 구조화하는 편집자다.
+잠금 Canon은 수정 대상이 아니다. 보고서의 실제 REVISE 원인만 원자 단위 문제로 분해한다.
+서로 같은 원인의 반복 지적은 하나로 합친다. 출력은 설명 없이 유효한 JSON 객체 하나만 반환한다.""",
+                                    f"""# 잠금 Canon/Story Bible
+{data.get('concept_lab', {}).get('locked_bible', '')}
 
-# 현재 시즌 구조 검증의 REVISE 지적사항
+# 현재 시즌 감사 보고서
 {audit_before}
-
-# 작업
-위 지적사항만 해결하라. 시즌 전체를 새로 쓰지 마라.
-반드시 정확히 {total}개 회차를 유지하라.
 
 출력 형식:
 {{
-  "season_plan": [기존과 동일한 스키마의 {total}개 회차 객체],
-  "changed_episodes": [실제로 수정한 회차 번호],
-  "change_summary": ["지적 → 최소 수정 → 이유"],
-  "canon_guard": "잠금 Canon을 변경하지 않았다는 짧은 확인"
+  "issues": [
+    {{"id":"I1", "problem":"문제", "episodes":[1,2], "target_fields":["beats"], "required_fix":"Canon을 바꾸지 않는 최소 수정 목표"}}
+  ]
 }}"""
-                            )
+                                )
+                                issue_obj = extract_json(issue_raw)
+                                issues = issue_obj.get("issues", []) if isinstance(issue_obj, dict) else []
+                                issues = [x for x in issues if isinstance(x, dict) and x.get("problem")]
+                                if not issues:
+                                    raise ValueError("감사 지적을 구조화하지 못했습니다.")
+                                status.write(f"수정 대상 {len(issues)}개를 구조화했습니다. 기존 회차의 필요한 필드만 패치합니다.")
 
-                            try:
+                                raw_patch = call_model(
+                                    api_key, model,
+                                    """당신은 드라마 시즌 설계의 초미세 패치 담당자다.
+잠금 Story Bible/Canon은 절대 수정하지 않는다.
+시즌 전체 객체를 다시 작성하지 말고, 기존 회차의 기존 필드에 대한 patch 연산만 제안한다.
+지적과 무관한 필드는 절대 건드리지 않는다. 새 인물·새 사망·새 친자관계·새 범인·새 핵심 반전을 추가하지 않는다.
+인물 이름/성별/관계/욕망/핵심 진실/결말을 재정의하지 않는다.
+외부 확인 필요 전문 사실은 단정하지 않는다.
+출력은 설명 없이 오직 유효한 JSON 객체 하나만 반환한다.""",
+                                    f"""{ctx}
+
+# 이번에 해결할 구조화 지적
+{json.dumps(issues, ensure_ascii=False, indent=2)}
+
+# 작업 규칙
+- 정확히 위 지적을 해결하는 데 필요한 회차/필드만 수정한다.
+- episode는 기존 1~{total}화만 가능하다.
+- field는 해당 회차 객체에 이미 존재하는 키만 가능하다.
+- value에는 그 필드의 완성된 새 값만 넣는다.
+- 한 지적을 고치면서 다른 회차나 다른 필드를 정리/개선하지 않는다.
+
+출력 형식:
+{{
+  "edits": [
+    {{"issue_id":"I1", "episode":1, "field":"beats", "value":[], "reason":"왜 이 최소 변경이 필요한지"}}
+  ],
+  "change_summary":["I1 → 최소 수정 → 이유"],
+  "canon_guard":"Canon 사실 자체를 변경하지 않았다는 확인"
+}}"""
+                                )
                                 patch = extract_json(raw_patch)
-                                candidate = patch.get("season_plan") if isinstance(patch, dict) else None
-                                if not isinstance(candidate, list):
-                                    raise ValueError("보완 결과에 season_plan 배열이 없습니다.")
-                                candidate = [x for x in candidate if isinstance(x, dict)]
-                                candidate.sort(key=lambda x: int(x.get("number", 0) or 0))
-                                nums = [int(x.get("number", 0) or 0) for x in candidate]
-                                if len(candidate) != total or nums != list(range(1, total + 1)):
-                                    raise ValueError(f"회차 수/번호가 잘못되었습니다: {nums}")
+                                edits = patch.get("edits", []) if isinstance(patch, dict) else []
+                                if not isinstance(edits, list) or not edits:
+                                    raise ValueError("보완 결과에 적용 가능한 edits가 없습니다.")
 
-                                # 1차 방어: 모델에게 잠금 Canon 침해와 불필요한 대수술을 독립 검사시킨다.
+                                candidate = json.loads(json.dumps(before_plan, ensure_ascii=False))
+                                by_no = {int(ep.get("number", 0) or 0): ep for ep in candidate if isinstance(ep, dict)}
+                                changed_episodes = set()
+                                changed_fields = []
+                                issue_ids = {str(x.get("id")) for x in issues}
+                                for edit in edits:
+                                    if not isinstance(edit, dict):
+                                        continue
+                                    issue_id = str(edit.get("issue_id", ""))
+                                    ep_no = int(edit.get("episode", 0) or 0)
+                                    field = str(edit.get("field", "")).strip()
+                                    if issue_id not in issue_ids:
+                                        raise ValueError(f"감사 지적과 연결되지 않은 패치입니다: {issue_id}")
+                                    if ep_no not in by_no:
+                                        raise ValueError(f"존재하지 않는 회차 패치입니다: {ep_no}")
+                                    if field in {"number"} or field not in by_no[ep_no]:
+                                        raise ValueError(f"{ep_no}화의 허용되지 않은 필드 패치입니다: {field}")
+                                    old_value = by_no[ep_no].get(field)
+                                    new_value = edit.get("value")
+                                    # 스키마 타입을 가능한 한 보존한다.
+                                    if isinstance(old_value, list) and not isinstance(new_value, list):
+                                        raise ValueError(f"{ep_no}화 {field}는 배열이어야 합니다.")
+                                    if isinstance(old_value, dict) and not isinstance(new_value, dict):
+                                        raise ValueError(f"{ep_no}화 {field}는 객체여야 합니다.")
+                                    if old_value != new_value:
+                                        by_no[ep_no][field] = new_value
+                                        changed_episodes.add(ep_no)
+                                        changed_fields.append(f"{ep_no}화.{field}")
+
+                                if not changed_fields:
+                                    raise ValueError("실제 변경된 필드가 없습니다.")
+
+                                # 구조적 잠금 검사: 패치 목록에 없는 모든 값이 byte-level 의미상 동일해야 한다.
+                                for old_ep, new_ep in zip(before_plan, candidate):
+                                    ep_no = int(old_ep.get("number", 0) or 0)
+                                    for key in old_ep.keys():
+                                        tag = f"{ep_no}화.{key}"
+                                        if tag not in changed_fields and old_ep.get(key) != new_ep.get(key):
+                                            raise ValueError(f"허용되지 않은 연쇄 변경 감지: {tag}")
+
+                                status.write("필드 잠금 검사를 통과했습니다. Canon 보호 검사를 실행합니다.")
                                 guard_raw = call_model(
                                     api_key, model,
-                                    """당신은 Canon 변경 방지 감사관이다. 후보 수정안을 승인하거나 거부한다.
-잠금 Canon은 절대 변경할 수 없다. 새 인물·새 사망·새 친자관계·새 범인·새 핵심 반전 추가를 금지한다.
-REVISE 지적과 무관한 통과 구조를 바꾸는 대수술도 금지한다.
-외부 확인 필요 전문 사실을 확정 사실로 바꾸는 것도 금지한다.
+                                    """당신은 Canon 변경 방지 감사관이다.
+수정된 필드만 보고 잠금 Canon의 사실관계가 실제로 바뀌었는지 검사한다.
+감사 지적 해결을 위한 원인-결과 연결, 정보 습득 장면, 기존 단서 명료화, 동기/생활 연속성 보강은 허용한다.
+새 인물·새 사망·새 친자관계·새 범인·새 핵심 반전, Canon의 관계/결말/핵심 진실 변경은 거부한다.
+외부 확인 필요 사실을 확정 사실로 바꾸는 것도 거부한다.
 마지막 줄은 반드시 GUARD: PASS 또는 GUARD: REJECT.""",
                                     f"""# 잠금 Canon/Story Bible
 {data.get('concept_lab', {}).get('locked_bible', '')}
 
-# 기존 시즌 설계
-{json.dumps(before_plan, ensure_ascii=False, indent=2)}
+# 해결 대상 지적
+{json.dumps(issues, ensure_ascii=False, indent=2)}
 
-# REVISE 지적사항
-{audit_before}
+# 실제 변경 필드
+{json.dumps(edits, ensure_ascii=False, indent=2)}
 
-# 후보 국소 수정안
-{json.dumps(candidate, ensure_ascii=False, indent=2)}
-
-지적 해결에 필요한 최소 변경인지 독립 검사하라."""
+Canon 변경 여부와 지적 범위 초과 여부만 검사하라."""
                                 )
                                 if "GUARD: PASS" not in guard_raw.upper():
-                                    # 2.8.1: 첫 후보가 과보완이면 감사관의 거부 사유를 이용해 한 번 더 축소 패치한다.
-                                    status.write("첫 보완안이 Canon 보호 검사에서 보류되었습니다. 거부 사유를 반영해 더 작은 수정안으로 재시도합니다.")
-                                    retry_raw = call_model(
-                                        api_key, model,
-                                        """당신은 드라마 시즌 설계의 초미세 패치 담당자다.
-잠금 Canon과 기존 시즌의 통과 요소는 절대 변경하지 않는다.
-아래 Canon 감사관의 거부 사유를 해소하는 데 필요한 문장/필드만 수정한다.
-새 인물·새 사망·새 친자관계·새 범인·새 핵심 반전을 추가하지 않는다.
-인물의 이름/성별/관계/욕망/나이 등 Canon 사실을 재정의하지 않는다.
-외부 확인 필요 전문 사실은 단정하지 않는다.
-출력은 설명 없이 오직 유효한 JSON 객체 하나만 반환한다.""",
-                                        f"""# 잠금 Canon/Story Bible
-{data.get('concept_lab', {}).get('locked_bible', '')}
+                                    data["season_last_repair_rejection"] = {
+                                        "at": datetime.now().isoformat(timespec="seconds"),
+                                        "first_guard": guard_raw,
+                                        "second_guard": "2.8.2는 거부된 패치를 자동 확대 재작성하지 않습니다."
+                                    }
+                                    save_data(data)
+                                    raise ValueError("Canon 보호 검사에서 패치가 거부되었습니다. 거부 사유를 확인하세요.")
 
-# 원래 시즌 설계
-{json.dumps(before_plan, ensure_ascii=False, indent=2)}
-
-# 원래 REVISE 지적사항
-{audit_before}
-
-# 첫 후보에 대한 Canon 감사관 거부 사유
-{guard_raw}
-
-# 작업
-원래 시즌 설계를 기준으로, 위 REVISE 중 Canon을 바꾸지 않고 고칠 수 있는 항목만 최소 수정하라.
-Canon과 충돌하는 지적은 시즌 데이터의 잘못된 입력값을 Canon에 맞게 바로잡는 방식으로만 처리하라.
-반드시 정확히 {total}개 회차를 유지하라.
-
-출력 형식:
-{{
-  "season_plan": [기존과 동일한 스키마의 {total}개 회차 객체],
-  "changed_episodes": [실제로 수정한 회차 번호],
-  "change_summary": ["지적 → 최소 수정 → 이유"],
-  "canon_guard": "Canon 사실 자체는 변경하지 않았다는 확인"
-}}"""
-                                    )
-                                    retry_patch = extract_json(retry_raw)
-                                    retry_candidate = retry_patch.get("season_plan") if isinstance(retry_patch, dict) else None
-                                    if not isinstance(retry_candidate, list):
-                                        raise ValueError("재시도 결과에 season_plan 배열이 없습니다.\n\n[첫 Canon 거부 사유]\n" + guard_raw)
-                                    retry_candidate = [x for x in retry_candidate if isinstance(x, dict)]
-                                    retry_candidate.sort(key=lambda x: int(x.get("number", 0) or 0))
-                                    retry_nums = [int(x.get("number", 0) or 0) for x in retry_candidate]
-                                    if len(retry_candidate) != total or retry_nums != list(range(1, total + 1)):
-                                        raise ValueError(f"재시도 회차 수/번호가 잘못되었습니다: {retry_nums}")
-
-                                    guard2_raw = call_model(
-                                        api_key, model,
-                                        """당신은 Canon 변경 방지 감사관이다.
-'표현이 달라졌다'는 이유만으로 거부하지 말고, 잠금 Canon의 사실관계가 실제로 바뀌었는지를 검사한다.
-시즌 데이터에 Canon과 충돌하는 잘못된 입력값이 있었다면 Canon에 맞게 제거·교정하는 것은 허용한다.
-REVISE를 해결하기 위한 원인-결과 연결, 정보 습득 장면, 기존 단서 명료화, 동기 보강, 생활 연속성 보강은 허용한다.
-새 인물·새 사망·새 친자관계·새 범인·새 핵심 반전 추가, Canon의 관계/결말/핵심 진실 변경은 거부한다.
-외부 확인 필요 사실을 확정 사실로 바꾸는 것도 거부한다.
-마지막 줄은 반드시 GUARD: PASS 또는 GUARD: REJECT.""",
-                                        f"""# 잠금 Canon/Story Bible
-{data.get('concept_lab', {}).get('locked_bible', '')}
-
-# 기존 시즌 설계
-{json.dumps(before_plan, ensure_ascii=False, indent=2)}
-
-# REVISE 지적사항
-{audit_before}
-
-# 축소 재시도 후보
-{json.dumps(retry_candidate, ensure_ascii=False, indent=2)}
-
-Canon 사실 변경 여부만 중심으로 검사하라."""
-                                    )
-                                    if "GUARD: PASS" not in guard2_raw.upper():
-                                        data["season_last_repair_rejection"] = {
-                                            "at": datetime.now().isoformat(timespec="seconds"),
-                                            "first_guard": guard_raw,
-                                            "second_guard": guard2_raw
-                                        }
-                                        save_data(data)
-                                        raise ValueError("Canon 보호 검사에서 두 후보가 모두 거부되었습니다.\n\n[1차 거부 사유]\n" + guard_raw + "\n\n[2차 거부 사유]\n" + guard2_raw)
-                                    candidate = retry_candidate
-                                    patch = retry_patch
-                                    guard_raw = guard2_raw
-
-                                # 후보를 임시 반영한 뒤 전체 연속성을 다시 검사한다.
                                 data["season_plan"] = candidate
                                 rectx = compact_context(data, last_episode_count=0)
                                 reaudit = call_model(
                                     api_key, model,
                                     """당신은 시즌 전체 continuity 시뮬레이터다.
-각 화를 순서대로 실행한다고 가정해 상태 변화를 추적한다.
-칭찬하지 말고 모순을 찾는다. 확정 Story Bible은 변경할 수 없는 사실이다.""",
+각 화를 순서대로 실행해 상태 변화를 추적한다. 확정 Story Bible은 변경할 수 없는 사실이다.
+직전 감사의 문구를 기계적으로 반복하지 말고, 수정된 현재 시즌에 실제로 남아 있는 문제만 보고한다.
+해결된 문제는 다시 지적하지 않는다. 새 지적은 현재 데이터에서 구체적 근거가 있을 때만 추가한다.
+칭찬이나 개선 제안은 쓰지 않는다.""",
                                     f"""{rectx}
 
-1화부터 마지막 화까지 다시 순서대로 시뮬레이션하여 검사:
-- 원인 없는 결과
-- 인물이 알기 전에 사용하는 정보
-- 이미 안 사실을 다시 처음 아는 장면
-- 심지 않은 떡밥의 회수
-- 회수 예정인데 사라진 떡밥
-- 최종 반전의 사전 단서 부족
-- 잠금 Story Bible과 충돌
-- 시간/이동/나이 모순
-- 인물의 합리적인 대안 행동을 무시한 억지 전개
-- 외부 확인 필요 사실을 확정 법률·제도 사실처럼 단정하는지
+# 직전 감사에서 해결 대상으로 삼은 문제
+{json.dumps(issues, ensure_ascii=False, indent=2)}
 
+# 이번에 실제 변경된 필드
+{json.dumps(changed_fields, ensure_ascii=False)}
+
+1화부터 마지막 화까지 다시 검사:
+- 원인 없는 결과 / 정보 선후관계 / 중복 발견
+- 떡밥 심기·회수 / 최종 반전 단서
+- 잠금 Story Bible 충돌 / 시간·이동·나이 모순
+- 합리적 대안 행동을 무시한 억지 전개
+- 외부 확인 필요 사실의 법률·제도 단정
+
+보고서에는 '남은 문제'만 번호로 적고, 각 문제에 근거 회차를 명시하라.
+문제가 없으면 짧게 통과 이유만 적는다.
 마지막 줄은 반드시 VERDICT: PASS 또는 VERDICT: REVISE."""
                                 )
 
@@ -1571,7 +1566,9 @@ Canon 사실 변경 여부만 중심으로 검사하라."""
                                     "round": repair_round + 1,
                                     "at": datetime.now().isoformat(timespec="seconds"),
                                     "audit_before": audit_before,
-                                    "changed_episodes": patch.get("changed_episodes", []),
+                                    "issues": issues,
+                                    "changed_episodes": sorted(changed_episodes),
+                                    "changed_fields": changed_fields,
                                     "change_summary": patch.get("change_summary", []),
                                     "guard": guard_raw,
                                     "audit_after": reaudit,
@@ -1580,16 +1577,18 @@ Canon 사실 변경 여부만 중심으로 검사하라."""
                                 })
                                 data["season_audit"] = reaudit
                                 data["season_locked"] = False
+                                data.pop("season_last_repair_rejection", None)
                                 save_data(data)
-                                status.update(label="국소 보완 및 독립 재검증 완료", state="complete")
+                                status.update(label="필드 단위 국소 보완 및 독립 재검증 완료", state="complete")
                                 st.rerun()
                             except Exception as e:
                                 data["season_plan"] = before_plan
                                 save_data(data)
                                 status.update(label="국소 보완안을 채택하지 않았습니다.", state="error")
                                 st.error(f"보완 실패: {e}")
-                                with st.expander("보완 AI 원문 보기"):
-                                    st.write(raw_patch)
+                                if raw_patch:
+                                    with st.expander("보완 AI 원문 보기"):
+                                        st.write(raw_patch)
                 elif repair_round >= max_repairs:
                     st.error("자동 국소 보완 5회를 모두 사용했습니다. 남은 문제는 직접 확인한 뒤 시즌 설계를 수정하세요.")
 
@@ -1610,6 +1609,8 @@ Canon 사실 변경 여부만 중심으로 검사하라."""
                     st.markdown(f"**{h.get('round')}차 보완 · {h.get('at','')}**")
                     changed = h.get("changed_episodes", [])
                     st.write(f"수정 회차: {', '.join(map(str, changed)) if changed else 'AI 보고 없음'}")
+                    if h.get("changed_fields"):
+                        st.write(f"잠금 해제된 필드: {', '.join(h.get('changed_fields', []))}")
                     for item in h.get("change_summary", []):
                         st.write(f"- {item}")
                     with st.expander(f"{h.get('round')}차 재검증 결과"):
@@ -1873,4 +1874,4 @@ with tabs[10]:
             )
             st.write(result)
 
-st.caption("AI 드라마 작가실 2.8.1 · 거부 사유를 표시하고 Canon 보호 검사 피드백으로 국소 보완안을 자동 재시도합니다. · project.json 저장")
+st.caption("AI 드라마 작가실 2.8.2 · 거부 사유를 표시하고 Canon 보호 검사 피드백으로 국소 보완안을 자동 재시도합니다. · project.json 저장")
