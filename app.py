@@ -28,18 +28,22 @@ DEFAULT_DATA = {
     "knowledge": [],
     "episodes": [],
     "notes": [],
+    "creative_controls": {"makjang": 8, "twist": 8, "realism": 7, "legal_accuracy": 6},
     "writer_rules": [
         {"id":"RULE-001","text":"현실의 법률·제도가 핵심 장치라면 확정 전에 실제 성립 가능성을 검증한다."},
         {"id":"RULE-002","text":"장기간 유지된 비밀에는 발견되지 않은 구체적인 이유가 있어야 한다."},
         {"id":"RULE-003","text":"재산·상속을 둘러싼 욕망은 실제 법적 권리와 인물이 권리가 있다고 믿는 이유를 구분한다."},
         {"id":"RULE-004","text":"반전을 위해 정상적인 인물이 당연히 할 질문을 하지 않게 만들지 않는다."},
-        {"id":"RULE-005","text":"문제 하나를 수정할 때 관련 없는 확정 설정까지 연쇄적으로 바꾸지 않는다."}
+        {"id":"RULE-005","text":"문제 하나를 수정할 때 관련 없는 확정 설정까지 연쇄적으로 바꾸지 않는다."},
+        {"id":"RULE-006","text":"AI가 새로 제안한 설정은 사용자 승인 전까지 Canon이 아니다."},
+        {"id":"RULE-007","text":"검증 과정이 장르의 핵심 재미를 제거하거나 법률·절차 설명을 이야기의 중심으로 만들지 않는다."}
     ],
     "concept_lab": {
         "brief":"",
         "candidate":"",
         "audit":"",
         "revised":"",
+        "revision_approved":False,
         "reaudit":"",
         "locked":False,
         "locked_bible":"",
@@ -70,6 +74,10 @@ def migrate_data(raw):
                 "season_plan", "knowledge", "episodes", "notes", "writer_rules"]:
         if not isinstance(base.get(key), list):
             base[key] = []
+    if not isinstance(base.get("creative_controls"), dict):
+        base["creative_controls"] = clone_default()["creative_controls"]
+    for k, v in clone_default()["creative_controls"].items():
+        base["creative_controls"].setdefault(k, v)
     if not isinstance(base.get("concept_lab"), dict):
         base["concept_lab"] = clone_default()["concept_lab"]
     for k, v in clone_default()["concept_lab"].items():
@@ -155,6 +163,9 @@ def compact_context(data, current_episode=None, last_episode_count=4):
 
     return f"""# 작가실 영구 규칙
 {json.dumps(data.get('writer_rules', []), ensure_ascii=False, indent=2)}
+
+# 작품 성향
+{creative_controls_text(data)}
 
 # 잠금된 기획 바이블
 {data.get('concept_lab', {}).get('locked_bible', '') or "아직 잠금된 기획 없음"}
@@ -313,10 +324,8 @@ def upsert_knowledge(data, rows):
 
 
 def normalize_bible_payload(payload, episode_count=10):
-    """AI가 만든 구조화 Story Bible을 기존 프로젝트 스키마에 맞춘다."""
     if not isinstance(payload, dict):
         raise ValueError("Story Bible JSON 객체가 아닙니다.")
-
     meta = payload.get("meta", {}) if isinstance(payload.get("meta"), dict) else {}
     meta.setdefault("title", "새 드라마")
     meta.setdefault("genre", "")
@@ -325,35 +334,22 @@ def normalize_bible_payload(payload, episode_count=10):
     meta.setdefault("premise", "")
     meta.setdefault("final_truth", "")
     meta["episode_count"] = int(meta.get("episode_count", episode_count) or episode_count)
-
     def only_dicts(name):
         rows = payload.get(name, [])
         return [x for x in rows if isinstance(x, dict)] if isinstance(rows, list) else []
-
-    return {
-        "meta": meta,
-        "characters": only_dicts("characters"),
-        "relationships": only_dicts("relationships"),
-        "timeline": only_dicts("timeline"),
-        "foreshadowing": only_dicts("foreshadowing"),
-        "knowledge": only_dicts("knowledge"),
-    }
-
+    return {"meta":meta,"characters":only_dicts("characters"),"relationships":only_dicts("relationships"),"timeline":only_dicts("timeline"),"foreshadowing":only_dicts("foreshadowing"),"knowledge":only_dicts("knowledge")}
 
 def apply_bible_to_project(data, bible):
-    """확정 기획을 수동 복붙 없이 프로젝트 데이터로 반영한다."""
     data["meta"].update(bible["meta"])
     data["characters"] = bible["characters"]
     data["relationships"] = bible["relationships"]
     data["timeline"] = bible["timeline"]
     data["foreshadowing"] = bible["foreshadowing"]
     data["knowledge"] = bible["knowledge"]
-    # 새 바이블을 적용하면 기존 시즌/대본은 더 이상 안전하지 않다.
     data["season_plan"] = []
     data["episodes"] = []
     data["season_locked"] = False
     data["season_audit"] = ""
-
 
 def build_bible_from_locked_concept(api_key, model, data):
     lab = data["concept_lab"]
@@ -362,59 +358,15 @@ def build_bible_from_locked_concept(api_key, model, data):
         raise ValueError("잠금된 기획이 없습니다.")
     rules = json.dumps(data.get("writer_rules", []), ensure_ascii=False, indent=2)
     total = int(data.get("meta", {}).get("episode_count", 10) or 10)
-
-    raw = call_model(
-        api_key, model,
-        """당신은 드라마 제작실의 Story Bible 편집자다.
-잠금된 기획의 사실을 바꾸지 말고 구조화만 한다.
-새로운 핵심 반전, 친자관계, 범인, 혼인관계, 사망 여부를 임의로 추가하지 않는다.
-불확실한 전문 사실을 확정 사실로 승격하지 않는다.
-출력은 설명 없이 오직 유효한 JSON 객체 하나만 반환한다.""",
-        f"""잠금된 기획:
-{locked}
-
-작가실 규칙:
-{rules}
-
-다음 JSON 스키마로 구조화하라.
-{{
-  "meta": {{
-    "title": "제목",
-    "genre": "장르",
-    "format": "숏폼 {total}부작, 회당 분량",
-    "tone": "톤과 문체",
-    "premise": "공개 가능한 기본 설정/로그라인",
-    "final_truth": "작가만 아는 전체 진실",
-    "episode_count": {total}
-  }},
-  "characters": [
-    {{
-      "name":"이름","age":35,"birth_year":null,"role":"역할",
-      "biological_mother":"","biological_father":"","raised_by":"",
-      "secret":"숨기는 사실","desire":"욕망/목표"
-    }}
-  ],
-  "relationships": [
-    {{"a":"인물A","b":"인물B","type":"관계","detail":"설명"}}
-  ],
-  "timeline": [
-    {{"year":"시점 또는 연도","event":"사건","person":"관련 인물","known_by":"현재 알고 있는 인물"}}
-  ],
-  "foreshadowing": [
-    {{"clue":"떡밥","planted_episode":1,"payoff_episode":5,"truth":"실제 의미","status":"미회수"}}
-  ],
-  "knowledge": [
-    {{"person":"인물","fact":"본편 시작 전에 이미 아는 사실","learned_episode":0,"source":"알게 된 이유"}}
-  ]
-}}
-
-중요:
-- 잠금 기획에 없는 구체적 혈연/법률관계를 임의 생성하지 마라.
-- final_truth에는 작가만 알아야 하는 범인/친자/반전 등 잠금 기획의 정답을 빠뜨리지 마라.
-- premise에는 초반 시청자가 알면 안 되는 최종 반전을 노출하지 마라."""
-    )
+    raw = call_model(api_key, model,
+        """당신은 드라마 제작실의 Story Bible 편집자다. 잠금된 기획의 사실을 바꾸지 말고 구조화만 한다. 새로운 핵심 반전, 친자관계, 범인, 혼인관계, 사망 여부를 임의로 추가하지 않는다. 불확실한 전문 사실을 확정 사실로 승격하지 않는다. 출력은 설명 없이 오직 유효한 JSON 객체 하나만 반환한다.""",
+        f"""잠금된 기획:\n{locked}\n\n작가실 규칙:\n{rules}\n\n다음 JSON 스키마로 구조화하라.\n{{\n  \"meta\": {{\"title\":\"제목\",\"genre\":\"장르\",\"format\":\"숏폼 {total}부작, 회당 분량\",\"tone\":\"톤과 문체\",\"premise\":\"공개 가능한 기본 설정/로그라인\",\"final_truth\":\"작가만 아는 전체 진실\",\"episode_count\":{total}}},\n  \"characters\": [{{\"name\":\"이름\",\"age\":35,\"birth_year\":null,\"role\":\"역할\",\"biological_mother\":\"\",\"biological_father\":\"\",\"raised_by\":\"\",\"secret\":\"숨기는 사실\",\"desire\":\"욕망/목표\"}}],\n  \"relationships\": [{{\"a\":\"인물A\",\"b\":\"인물B\",\"type\":\"관계\",\"detail\":\"설명\"}}],\n  \"timeline\": [{{\"year\":\"시점 또는 연도\",\"event\":\"사건\",\"person\":\"관련 인물\",\"known_by\":\"현재 알고 있는 인물\"}}],\n  \"foreshadowing\": [{{\"clue\":\"떡밥\",\"planted_episode\":1,\"payoff_episode\":5,\"truth\":\"실제 의미\",\"status\":\"미회수\"}}],\n  \"knowledge\": [{{\"person\":\"인물\",\"fact\":\"본편 시작 전에 이미 아는 사실\",\"learned_episode\":0,\"source\":\"알게 된 이유\"}}]\n}}\n잠금 기획에 없는 구체적 혈연/법률관계를 임의 생성하지 마라. final_truth에는 잠금 기획의 정답을 빠뜨리지 마라. premise에는 최종 반전을 노출하지 마라.""")
     return normalize_bible_payload(extract_json(raw), total)
 
+def creative_controls_text(data):
+    c = data.get("creative_controls", {})
+    return (f"막장도 {c.get('makjang',8)}/10, 반전 강도 {c.get('twist',8)}/10, "
+            f"현실성 {c.get('realism',7)}/10, 법률 정확성 {c.get('legal_accuracy',6)}/10")
 
 st.set_page_config(
     page_title="AI 드라마 작가실 2.0",
@@ -422,8 +374,8 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🎬 AI 드라마 작가실 2.2")
-st.caption("한 줄 아이디어 → 검증 → 자동 Story Bible → 시즌 설계 → 집필까지 프로그램 안에서")
+st.title("🎬 AI 드라마 작가실 2.3")
+st.caption("한 줄 아이디어 → 재미/현실성 조절 → 레드팀 → 사용자 승인 → Canon 잠금 → 시즌/대본")
 
 if "data" not in st.session_state:
     st.session_state.data = load_data()
@@ -486,8 +438,18 @@ tabs = st.tabs([
 # 0. 기획 검증실
 with tabs[0]:
     st.subheader("🧪 기획 검증실")
-    st.caption("바로 대본을 쓰지 않습니다. 먼저 설정을 만들고, 공격하고, 최소 수정하고, 다시 검사한 뒤 사람이 잠급니다.")
+    st.caption("바로 대본을 쓰지 않습니다. 먼저 설정을 만들고 공격 검증합니다. AI 수정은 '제안'일 뿐이며, 사용자가 승인해야 Canon 후보가 됩니다.")
     lab = data["concept_lab"]
+
+    st.markdown("### 🎚️ 작품 성향")
+    cc = data["creative_controls"]
+    a,b,c,d = st.columns(4)
+    cc["makjang"] = a.slider("막장도", 1, 10, int(cc.get("makjang",8)), help="높을수록 관계 충돌·감정 폭발을 우선")
+    cc["twist"] = b.slider("반전 강도", 1, 10, int(cc.get("twist",8)), help="높을수록 회차별 뒤집기와 재해석을 강화")
+    cc["realism"] = c.slider("현실성", 1, 10, int(cc.get("realism",7)), help="높을수록 우연·편의적 행동을 엄격히 제한")
+    cc["legal_accuracy"] = d.slider("법률 정확성", 1, 10, int(cc.get("legal_accuracy",6)), help="높을수록 법·상속·회사 절차를 보수적으로 다룸")
+    st.caption("법률 정확성이 낮아도 거짓 법률을 만들어도 된다는 뜻은 아닙니다. 불확실하면 '외부 확인 필요'로 남깁니다.")
+    save_data(data)
 
     lab["brief"] = st.text_area(
         "만들고 싶은 드라마",
@@ -516,6 +478,14 @@ with tabs[0]:
 작가실 규칙:
 {rules}
 
+작품 성향:
+{creative_controls_text(data)}
+
+우선순위 원칙:
+- 막장도/반전이 높아도 현실성 검증을 통과해야 한다.
+- 현실성/법률 정확성이 높아도 설명문과 절차가 드라마의 중심이 되지 않게 한다.
+- 정확한 지분율·금액·법률 용어는 이야기상 꼭 필요하고 근거가 있을 때만 사용한다.
+
 하나의 가장 강한 기획안을 작성하라.
 반드시 포함:
 - 한 줄 로그라인
@@ -532,6 +502,7 @@ with tabs[0]:
             )
             lab["audit"] = ""
             lab["revised"] = ""
+            lab["revision_approved"] = False
             lab["reaudit"] = ""
             lab["locked"] = False
             lab["locked_bible"] = ""
@@ -556,6 +527,9 @@ with tabs[0]:
 영구 규칙:
 {rules}
 
+작품 성향:
+{creative_controls_text(data)}
+
 다음 순서로 공격 검증하라:
 1. 현실/법률/제도 성립성
 2. 시간선과 나이
@@ -575,14 +549,17 @@ with tabs[0]:
     if lab.get("audit"):
         st.markdown("### 공격검증 결과")
         st.write(lab["audit"])
-        if st.button("③ 최소 수정안 만들기", use_container_width=True):
+        if st.button("③ 수정 제안 만들기", use_container_width=True):
             rules = json.dumps(data["writer_rules"], ensure_ascii=False, indent=2)
             lab["revised"] = call_model(
                 api_key, model,
-                """당신은 드라마 쇼러너다. 레드팀 지적을 고치되 원래 기획의 매력을 보존한다.
-문제 하나를 고치려고 관련 없는 설정을 바꾸지 않는다.
-현실성이 불확실한 전문 사실은 억지로 해결하지 말고 검증 필요로 남긴다.
-수정된 사실과 유지된 사실을 명확히 구분한다.""",
+                """당신은 드라마 쇼러너다. 당신은 확정권자가 아니라 수정안을 제안하는 사람이다.
+레드팀의 치명적/중요 지적만 최소 변경으로 해결한다.
+원래 기획의 핵심 훅, 관계, 장르적 재미를 최대한 보존한다.
+새로운 인물·과거 사건·지분율·법률 장치·친자관계·범인·사망을 꼭 필요하지 않으면 추가하지 않는다.
+새 설정이 불가피하면 반드시 '신규 제안'이라고 표시하고 이유를 적는다.
+현실성이 불확실한 전문 사실은 '외부 확인 필요'로 남긴다.
+절대 스스로 확정했다고 말하지 않는다.""",
                 f"""원 기획:
 {lab['candidate']}
 
@@ -592,41 +569,70 @@ with tabs[0]:
 규칙:
 {rules}
 
-치명적/중요 문제를 최소 변경으로 수정한 통합 기획안을 다시 작성하라.
-끝에 '변경된 설정' 목록을 별도로 적어라."""
+작품 성향:
+{creative_controls_text(data)}
+
+다음 형식으로 작성하라:
+1) 유지되는 핵심 설정
+2) 변경 제안 (각 항목: 기존 → 제안 → 이유)
+3) 신규 제안 (없으면 '없음')
+4) 외부 확인 필요
+5) 수정 통합 기획안
+6) 재미 손실 점검: 검증 때문에 이야기가 법무/절차극으로 변했는지 평가
+
+정확한 숫자·지분율·법률 절차는 꼭 필요한 경우가 아니면 만들지 마라."""
             )
+            lab["revision_approved"] = False
+            lab["reaudit"] = ""
             save_data(data)
             st.rerun()
 
     if lab.get("revised"):
-        st.markdown("### 수정 기획안")
+        st.markdown("### AI 수정 제안 — 아직 확정 아님")
+        st.warning("아래 내용은 AI 제안입니다. 승인 전에는 Story Bible이나 Canon에 반영되지 않습니다.")
         st.write(lab["revised"])
-        if st.button("④ 수정안 재검증", use_container_width=True):
+        c_yes, c_no = st.columns(2)
+        if c_yes.button("✅ 이 수정안을 승인하고 재검증", use_container_width=True):
+            lab["revision_approved"] = True
             rules = json.dumps(data["writer_rules"], ensure_ascii=False, indent=2)
             lab["reaudit"] = call_model(
                 api_key, model,
                 """당신은 두 번째 독립 레드팀이다. 이전 검토자의 결론을 믿지 말고 처음부터 다시 검사한다.
 치명적 오류가 하나라도 있으면 PASS를 주지 않는다.
+검증 때문에 이야기의 장르적 훅과 감정 엔진이 사라졌다면 그것도 중요한 결함으로 본다.
 현실/법률 전문 사실이 핵심인데 확인되지 않았으면 CONDITIONAL PASS 또는 REVISE로 표시한다.""",
-                f"""수정 기획:
+                f"""사용자가 승인한 수정 기획 후보:
 {lab['revised']}
+
+원 기획:
+{lab['candidate']}
 
 규칙:
 {rules}
 
+작품 성향:
+{creative_controls_text(data)}
+
 현실성, 법률/제도, 시간선, 비밀 유지, 인물 동기, 인과관계, 반전 공정성,
-우연성, 기존 사실 충돌을 독립적으로 재검증하라.
+우연성, 기존 사실 충돌, 원래 핵심 훅 보존 여부를 독립적으로 재검증하라.
+정확한 숫자나 전문 절차가 불필요하게 추가되었으면 지적하라.
 마지막 줄은 반드시 VERDICT: PASS / CONDITIONAL PASS / REVISE / REJECT 중 하나."""
             )
+            save_data(data)
+            st.rerun()
+        if c_no.button("↩️ 승인하지 않고 새 수정 제안", use_container_width=True):
+            lab["revised"] = ""
+            lab["revision_approved"] = False
+            lab["reaudit"] = ""
             save_data(data)
             st.rerun()
 
     if lab.get("reaudit"):
         st.markdown("### 독립 재검증")
         st.write(lab["reaudit"])
-        verdict_pass = "VERDICT: PASS" in lab["reaudit"].upper()
+        verdict_pass = "VERDICT: PASS" in lab["reaudit"].upper() and lab.get("revision_approved", False)
         if verdict_pass:
-            st.success("재검증 PASS. 사람이 읽고 동의할 때만 설정을 잠그세요.")
+            st.success("독립 재검증 PASS. 이제 사용자가 최종 승인하면 Canon으로 잠글 수 있습니다.")
             if st.button("🔒 이 설정 확정 + Story Bible 자동 생성", type="primary", use_container_width=True):
                 if not api_key:
                     st.error("OpenAI API Key가 필요합니다.")
@@ -636,7 +642,6 @@ with tabs[0]:
                     lab["locked_at"] = datetime.now().isoformat(timespec="seconds")
                     data["season_locked"] = False
                     save_data(data)
-
                     with st.status("확정 기획을 Story Bible로 자동 변환 중", expanded=True) as status:
                         try:
                             bible = build_bible_from_locked_concept(api_key, model, data)
@@ -657,11 +662,7 @@ with tabs[0]:
     if lab.get("locked"):
         st.divider()
         st.success(f"🔒 Story Bible 잠금 완료 · {lab.get('locked_at','')}")
-        st.info(
-            f"자동 구축됨: 인물 {len(data['characters'])}명 · 관계 {len(data['relationships'])}개 · "
-            f"연표 {len(data['timeline'])}개 · 떡밥 {len(data['foreshadowing'])}개 · "
-            f"초기 정보 {len(data['knowledge'])}개"
-        )
+        st.info(f"자동 구축됨: 인물 {len(data['characters'])}명 · 관계 {len(data['relationships'])}개 · 연표 {len(data['timeline'])}개 · 떡밥 {len(data['foreshadowing'])}개 · 초기 정보 {len(data['knowledge'])}개")
         with st.expander("잠금된 바이블 보기"):
             st.write(lab.get("locked_bible", ""))
 
@@ -1154,41 +1155,9 @@ with tabs[9]:
                 )
 
                 st.write("3/7 대사 전문작가: 대사의 맛과 감정 충돌 강화")
-                dialogue = call_model(
-                    api_key,
-                    model,
-                    """당신은 한국 숏폼 드라마의 대사 전문작가다.
-사건과 확정 설정은 바꾸지 않는다.
-설명 대사를 줄이고 인물별 말투, 숨은 의도, 감정 충돌, 기억에 남는 짧은 대사를 강화한다.
-새로운 비밀이나 반전을 추가하지 않는다.""",
-                    f"""{ctx}
-
-구성:
-{outline}
-
-초고:
-{draft}
-
-같은 사건 순서와 정보 공개 시점을 유지하면서 대사와 행동만 더 날카롭게 다듬은 대본을 작성하라."""
-                )
-
+                dialogue = call_model(api_key, model, "당신은 한국 숏폼 드라마의 대사 전문작가다. 사건과 확정 설정은 바꾸지 않는다. 설명 대사를 줄이고 인물별 말투, 숨은 의도, 감정 충돌, 기억에 남는 짧은 대사를 강화한다. 새로운 비밀이나 반전을 추가하지 않는다.", f"{ctx}\n\n구성:\n{outline}\n\n초고:\n{draft}\n\n같은 사건 순서와 정보 공개 시점을 유지하면서 대사와 행동만 더 날카롭게 다듬은 대본을 작성하라.")
                 st.write("4/7 숏폼 편집자: 첫 5초와 이탈 구간 강화")
-                retention = call_model(
-                    api_key,
-                    model,
-                    """당신은 숏폼 드라마 편집자다.
-확정 설정, 사건 순서, 공개 정보, 최종 클리프행어는 바꾸지 않는다.
-첫 3~5초 훅을 선명하게 하고 중복 설명과 늘어지는 부분을 제거한다.
-60~120초 안에서 감정 상승과 마지막 10초의 힘을 강화한다.
-새 반전은 만들지 않는다.""",
-                    f"""{ctx}
-
-대사 강화본:
-{dialogue}
-
-촬영 가능한 최종 후보 대본으로 압축/강화하라."""
-                )
-
+                retention = call_model(api_key, model, "당신은 숏폼 드라마 편집자다. 확정 설정, 사건 순서, 공개 정보, 최종 클리프행어는 바꾸지 않는다. 첫 3~5초 훅을 선명하게 하고 중복 설명과 늘어지는 부분을 제거한다. 60~120초 안에서 감정 상승과 마지막 10초의 힘을 강화한다. 새 반전은 만들지 않는다.", f"{ctx}\n\n대사 강화본:\n{dialogue}\n\n촬영 가능한 최종 후보 대본으로 압축/강화하라.")
                 st.write("5/7 연속성 편집자: 모순/조기 스포일러/정보 오류 검사")
                 audit = call_model(
                     api_key,
@@ -1363,4 +1332,4 @@ with tabs[10]:
             )
             st.write(result)
 
-st.caption("AI 드라마 작가실 2.2 · 검증을 통과한 설정만 잠그고 집필합니다. · project.json 저장")
+st.caption("AI 드라마 작가실 2.3 · 검증을 통과한 설정만 잠그고 집필합니다. · project.json 저장")
