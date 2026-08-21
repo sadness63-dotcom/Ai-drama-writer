@@ -1,11 +1,12 @@
 import json
 import os
 import re
+import time
 from datetime import datetime
 from pathlib import Path
 
 import streamlit as st
-from openai import OpenAI
+from openai import OpenAI, RateLimitError, APIConnectionError, APITimeoutError, APIError
 
 APP_DIR = Path(__file__).parent
 DATA_FILE = APP_DIR / "project.json"
@@ -140,13 +141,43 @@ def get_client(api_key):
 
 
 def call_model(api_key, model, instructions, prompt):
+    """2.9.1: transient API limits are retried; quota/billing errors stop cleanly without a traceback."""
     client = get_client(api_key)
-    resp = client.responses.create(
-        model=model,
-        instructions=instructions,
-        input=prompt,
-    )
-    return resp.output_text.strip()
+    waits = (2, 5, 10)
+    for attempt in range(len(waits) + 1):
+        try:
+            resp = client.responses.create(
+                model=model,
+                instructions=instructions,
+                input=prompt,
+            )
+            return resp.output_text.strip()
+        except RateLimitError as e:
+            msg = str(e).lower()
+            quota_error = any(x in msg for x in ("insufficient_quota", "billing", "quota", "credit"))
+            if quota_error:
+                st.error("OpenAI API 사용 한도 또는 결제/크레딧 문제로 요청이 중단되었습니다. API 결제 상태와 사용 한도를 확인한 뒤 다시 실행해 주세요.")
+                st.info("2.9.1은 이 경우 추가 재시도를 하지 않아 불필요한 API 호출을 막습니다.")
+                st.stop()
+            if attempt < len(waits):
+                wait = waits[attempt]
+                st.warning(f"API 요청이 잠시 제한되었습니다. {wait}초 후 자동으로 다시 시도합니다. ({attempt + 1}/{len(waits)})")
+                time.sleep(wait)
+                continue
+            st.error("API 요청 제한이 계속되고 있습니다. 잠시 후 다시 시도해 주세요.")
+            st.stop()
+        except (APIConnectionError, APITimeoutError):
+            if attempt < len(waits):
+                wait = waits[attempt]
+                st.warning(f"API 연결이 불안정합니다. {wait}초 후 자동으로 다시 시도합니다. ({attempt + 1}/{len(waits)})")
+                time.sleep(wait)
+                continue
+            st.error("OpenAI API 연결에 실패했습니다. 네트워크 상태를 확인한 뒤 다시 시도해 주세요.")
+            st.stop()
+        except APIError as e:
+            st.error(f"OpenAI API 요청을 완료하지 못했습니다: {type(e).__name__}")
+            st.info("잠시 후 다시 시도하거나 API 설정을 확인해 주세요.")
+            st.stop()
 
 
 def extract_json(text):
@@ -605,7 +636,7 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🎬 AI 드라마 작가실 2.9.0")
+st.title("🎬 AI 드라마 작가실 2.9.1")
 st.caption("한 줄 아이디어 → 재미/현실성 조절 → 레드팀 → 사용자 승인 → Canon 잠금 → 시즌/대본")
 
 if "data" not in st.session_state:
@@ -2016,7 +2047,7 @@ with tabs[9]:
                     "state_changes": state,
                     "preflight": preflight,
                     "final_gate": gate,
-                    "pipeline_version": "2.9.0",
+                    "pipeline_version": "2.9.1",
                     "created_at": datetime.now().isoformat(timespec="seconds"),
                 }
 
@@ -2110,4 +2141,4 @@ with tabs[10]:
             )
             st.write(result)
 
-st.caption("AI 드라마 작가실 2.9.0 · Canon 잠금 + 회차 최종 게이트 + 다음 화 상태 승계 · project.json 저장")
+st.caption("AI 드라마 작가실 2.9.1 · Canon 잠금 + 회차 최종 게이트 + 다음 화 상태 승계 · project.json 저장")
