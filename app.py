@@ -62,7 +62,9 @@ DEFAULT_DATA = {
     "season_locked": False,
     "season_audit": "",
     "season_repair_round": 0,
-    "season_repair_history": []
+    "season_repair_history": [],
+    "season_repair_engine_version": "2.8.3",
+    "season_repair_resolved": []
 }
 
 
@@ -101,6 +103,14 @@ def migrate_data(raw):
         base["season_repair_round"] = 0
     if not isinstance(base.get("season_repair_history"), list):
         base["season_repair_history"] = []
+    if not isinstance(base.get("season_repair_resolved"), list):
+        base["season_repair_resolved"] = []
+    # 2.8.3: 보완 엔진이 바뀌면 횟수만 새 세션으로 초기화한다. 과거 이력은 보존한다.
+    if base.get("season_repair_engine_version") != "2.8.3":
+        base["season_repair_round"] = 0
+        base["season_repair_resolved"] = []
+        base.pop("season_last_repair_rejection", None)
+        base["season_repair_engine_version"] = "2.8.3"
     return base
 
 
@@ -321,6 +331,124 @@ def deterministic_audit(data):
     return issues
 
 
+
+def deterministic_repair_project_data(data):
+    """2.8.3: AI 없이 안전하게 고칠 수 있는 구조 오류만 정리한다.
+    Canon 의미를 추론하지 않고, 명백한 무효값/스키마 오류만 보정한다.
+    """
+    changes = []
+
+    # 인물: 빈 이름 제거, age/birth_year의 0/음수만 미확정(None)으로 정리.
+    cleaned_chars = []
+    for c in data.get("characters", []):
+        if not isinstance(c, dict):
+            changes.append("인물표의 비객체 행 제거")
+            continue
+        name = str(c.get("name", "")).strip()
+        if not name:
+            changes.append("이름 없는 인물 행 제거")
+            continue
+        row = dict(c)
+        for key in ("age", "birth_year"):
+            val = row.get(key)
+            if isinstance(val, (int, float)) and val <= 0:
+                row[key] = None
+                changes.append(f"{name}.{key}: {val} → null")
+        cleaned_chars.append(row)
+    data["characters"] = cleaned_chars
+
+    # 관계: 빈 행/자기 자신 관계는 명백한 구조 오류이므로 제거한다.
+    cleaned_rel = []
+    for r in data.get("relationships", []):
+        if not isinstance(r, dict):
+            changes.append("관계표의 비객체 행 제거")
+            continue
+        a, b = str(r.get("a", "")).strip(), str(r.get("b", "")).strip()
+        if not a or not b:
+            changes.append("주체가 비어 있는 관계 행 제거")
+            continue
+        if a == b:
+            changes.append(f"자기 자신 관계 제거: {a}")
+            continue
+        cleaned_rel.append(r)
+    data["relationships"] = cleaned_rel
+
+    # 연표: known_by는 문자열 또는 문자열 배열만 허용. 그 외는 빈 값으로 정규화.
+    for e in data.get("timeline", []):
+        if not isinstance(e, dict):
+            continue
+        kb = e.get("known_by")
+        if kb is None:
+            e["known_by"] = ""
+            changes.append("연표 known_by: null → 빈 문자열")
+        elif isinstance(kb, list):
+            vals = [str(x).strip() for x in kb if str(x).strip()]
+            e["known_by"] = ", ".join(dict.fromkeys(vals))
+            changes.append("연표 known_by 배열 → 문자열 정규화")
+        elif not isinstance(kb, str):
+            e["known_by"] = str(kb)
+            changes.append("연표 known_by 타입 정규화")
+
+    # 정보 장부: learned_episode 음수는 0, 총 회차 초과는 마지막 화로 제한.
+    total = int(data.get("meta", {}).get("episode_count", 10) or 10)
+    for k in data.get("knowledge", []):
+        if not isinstance(k, dict):
+            continue
+        try:
+            ep = int(k.get("learned_episode", 0) or 0)
+        except Exception:
+            ep = 0
+        fixed = min(max(ep, 0), total)
+        if fixed != ep:
+            changes.append(f"정보 장부 learned_episode: {ep} → {fixed}")
+        k["learned_episode"] = fixed
+
+    # 떡밥 회차는 작품 범위를 벗어나지 않도록 정규화하되 순서는 뒤집지 않는다.
+    for f in data.get("foreshadowing", []):
+        if not isinstance(f, dict):
+            continue
+        try:
+            p = int(f.get("planted_episode", 1) or 1)
+        except Exception:
+            p = 1
+        try:
+            q = int(f.get("payoff_episode", p) or p)
+        except Exception:
+            q = p
+        p2 = min(max(p, 1), total)
+        q2 = min(max(q, p2), total)
+        if (p2, q2) != (p, q):
+            changes.append(f"떡밥 회차 정규화: {p}/{q} → {p2}/{q2}")
+        f["planted_episode"] = p2
+        f["payoff_episode"] = q2
+
+    return changes
+
+
+def split_repair_issues(issues):
+    """감사 지적을 구조/서사 문제로 나눠 하이브리드 보정에 사용한다."""
+    structural, narrative = [], []
+    structural_words = [
+        "인물표", "나이", "age", "birth_year", "known_by", "관계표", "연표",
+        "정보 장부", "지식 장부", "떡밥 장부", "스키마", "필드", "데이터"
+    ]
+    for issue in issues:
+        blob = " ".join(str(issue.get(k, "")) for k in ("problem", "required_fix", "target_fields")).lower()
+        if any(w.lower() in blob for w in structural_words):
+            structural.append(issue)
+        else:
+            narrative.append(issue)
+    return structural, narrative
+
+
+def count_audit_items(text):
+    """화면용 단순 지표. 감사 보고서의 번호형 문제 개수를 센다."""
+    if not text:
+        return 0
+    nums = re.findall(r"(?m)^\s*(?:\d+)[\.)]\s+", str(text))
+    return len(nums)
+
+
 def upsert_knowledge(data, rows):
     for row in rows:
         if not isinstance(row, dict):
@@ -510,7 +638,7 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🎬 AI 드라마 작가실 2.8.2")
+st.title("🎬 AI 드라마 작가실 2.8.3")
 st.caption("한 줄 아이디어 → 재미/현실성 조절 → 레드팀 → 사용자 승인 → Canon 잠금 → 시즌/대본")
 
 if "data" not in st.session_state:
@@ -1398,16 +1526,24 @@ with tabs[8]:
                         audit_before = data["season_audit"]
                         ctx = compact_context(data, last_episode_count=0)
 
-                        with st.status("REVISE 지적을 회차/필드 단위로 분해하고 있습니다.", expanded=True) as status:
+                        before_struct = {
+                            "characters": json.loads(json.dumps(data.get("characters", []), ensure_ascii=False)),
+                            "relationships": json.loads(json.dumps(data.get("relationships", []), ensure_ascii=False)),
+                            "timeline": json.loads(json.dumps(data.get("timeline", []), ensure_ascii=False)),
+                            "foreshadowing": json.loads(json.dumps(data.get("foreshadowing", []), ensure_ascii=False)),
+                            "knowledge": json.loads(json.dumps(data.get("knowledge", []), ensure_ascii=False)),
+                        }
+
+                        with st.status("구조 오류와 서사 오류를 분리해 보정하고 있습니다.", expanded=True) as status:
                             raw_patch = ""
+                            narrative_guard = ""
                             try:
-                                # 2.8.2 핵심: 시즌 전체를 다시 쓰게 하지 않는다.
-                                # 감사 지적을 먼저 구조화하고, 실제 수정은 기존 회차의 기존 필드에 대한 patch op만 받는다.
                                 issue_raw = call_model(
                                     api_key, model,
                                     """당신은 시즌 연속성 감사 보고서를 구조화하는 편집자다.
-잠금 Canon은 수정 대상이 아니다. 보고서의 실제 REVISE 원인만 원자 단위 문제로 분해한다.
-서로 같은 원인의 반복 지적은 하나로 합친다. 출력은 설명 없이 유효한 JSON 객체 하나만 반환한다.""",
+잠금 Canon은 수정 대상이 아니다. 실제 REVISE 원인만 원자 단위로 분해하고 같은 원인의 반복은 합친다.
+문제가 인물표/나이/known_by/스키마 같은 데이터 구조 오류인지, 회차 인과/정보 습득/동기/장면 연결 같은 서사 오류인지 구분할 수 있게 target_fields를 정확히 적는다.
+출력은 설명 없이 유효한 JSON 객체 하나만 반환한다.""",
                                     f"""# 잠금 Canon/Story Bible
 {data.get('concept_lab', {}).get('locked_bible', '')}
 
@@ -1426,165 +1562,233 @@ with tabs[8]:
                                 issues = [x for x in issues if isinstance(x, dict) and x.get("problem")]
                                 if not issues:
                                     raise ValueError("감사 지적을 구조화하지 못했습니다.")
-                                status.write(f"수정 대상 {len(issues)}개를 구조화했습니다. 기존 회차의 필요한 필드만 패치합니다.")
 
-                                raw_patch = call_model(
-                                    api_key, model,
-                                    """당신은 드라마 시즌 설계의 초미세 패치 담당자다.
-잠금 Story Bible/Canon은 절대 수정하지 않는다.
-시즌 전체 객체를 다시 작성하지 말고, 기존 회차의 기존 필드에 대한 patch 연산만 제안한다.
-지적과 무관한 필드는 절대 건드리지 않는다. 새 인물·새 사망·새 친자관계·새 범인·새 핵심 반전을 추가하지 않는다.
-인물 이름/성별/관계/욕망/핵심 진실/결말을 재정의하지 않는다.
-외부 확인 필요 전문 사실은 단정하지 않는다.
-출력은 설명 없이 오직 유효한 JSON 객체 하나만 반환한다.""",
-                                    f"""{ctx}
+                                structural_issues, narrative_issues = split_repair_issues(issues)
+                                status.write(f"총 {len(issues)}개: 구조 {len(structural_issues)}개 / 서사 {len(narrative_issues)}개로 분리했습니다.")
 
-# 이번에 해결할 구조화 지적
-{json.dumps(issues, ensure_ascii=False, indent=2)}
+                                # 1단계: 명백한 스키마 오류는 AI가 아니라 코드가 직접 보정한다.
+                                deterministic_changes = deterministic_repair_project_data(data)
+                                if deterministic_changes:
+                                    status.write("안전 규칙으로 구조 오류를 직접 보정했습니다: " + ", ".join(deterministic_changes[:8]))
 
-# 작업 규칙
-- 정확히 위 지적을 해결하는 데 필요한 회차/필드만 수정한다.
-- episode는 기존 1~{total}화만 가능하다.
-- field는 해당 회차 객체에 이미 존재하는 키만 가능하다.
-- value에는 그 필드의 완성된 새 값만 넣는다.
-- 한 지적을 고치면서 다른 회차나 다른 필드를 정리/개선하지 않는다.
+                                # 구조 오류 중 Canon 의미 판단이 필요한 것은 별도의 좁은 AI 패치로 처리한다.
+                                structure_ai_changes = []
+                                if structural_issues:
+                                    structure_raw = call_model(
+                                        api_key, model,
+                                        """당신은 Story Bible 구조 데이터 교정자다.
+잠금 Canon에 명시된 사실만 근거로 현재 구조 데이터의 잘못된 값만 교정한다.
+새 인물/새 관계/새 친자/새 사망/새 반전을 만들지 않는다.
+확실하지 않은 age/birth_year는 null로 둔다. Canon에 없는 세부 정보는 추측하지 않는다.
+전체 배열을 다시 만들지 말고 기존 행의 기존 필드에 대한 patch만 반환한다.
+출력은 유효한 JSON 객체 하나만 반환한다.""",
+                                        f"""# 잠금 Canon
+{data.get('concept_lab', {}).get('locked_bible', '')}
+
+# 구조 지적
+{json.dumps(structural_issues, ensure_ascii=False, indent=2)}
+
+# 현재 구조 데이터
+characters={json.dumps(data.get('characters', []), ensure_ascii=False)}
+relationships={json.dumps(data.get('relationships', []), ensure_ascii=False)}
+timeline={json.dumps(data.get('timeline', []), ensure_ascii=False)}
+knowledge={json.dumps(data.get('knowledge', []), ensure_ascii=False)}
+foreshadowing={json.dumps(data.get('foreshadowing', []), ensure_ascii=False)}
+
+출력:
+{{"edits":[{{"table":"characters|relationships|timeline|knowledge|foreshadowing","index":0,"field":"기존필드","value":null,"reason":"Canon 근거"}}]}}"""
+                                    )
+                                    sobj = extract_json(structure_raw)
+                                    sedits = sobj.get("edits", []) if isinstance(sobj, dict) else []
+                                    tables = {"characters", "relationships", "timeline", "knowledge", "foreshadowing"}
+                                    for ed in sedits if isinstance(sedits, list) else []:
+                                        if not isinstance(ed, dict):
+                                            continue
+                                        table = str(ed.get("table", ""))
+                                        idx = ed.get("index")
+                                        field = str(ed.get("field", ""))
+                                        if table not in tables or not isinstance(idx, int):
+                                            continue
+                                        rows = data.get(table, [])
+                                        if idx < 0 or idx >= len(rows) or not isinstance(rows[idx], dict):
+                                            continue
+                                        if field not in rows[idx] or field in {"number"}:
+                                            continue
+                                        old = rows[idx].get(field)
+                                        newv = ed.get("value")
+                                        if old != newv:
+                                            rows[idx][field] = newv
+                                            structure_ai_changes.append(f"{table}[{idx}].{field}")
+                                    if structure_ai_changes:
+                                        status.write("Canon 기준 구조 패치: " + ", ".join(structure_ai_changes[:10]))
+
+                                # 2단계: 서사 지적만 회차 필드 패치로 보낸다.
+                                narrative_applied = False
+                                changed_episodes = set()
+                                changed_fields = []
+                                candidate = json.loads(json.dumps(before_plan, ensure_ascii=False))
+                                patch = {"change_summary": []}
+
+                                if narrative_issues:
+                                    ctx_after_struct = compact_context(data, last_episode_count=0)
+                                    raw_patch = call_model(
+                                        api_key, model,
+                                        """당신은 드라마 시즌 설계의 초미세 패치 담당자다.
+잠금 Story Bible/Canon은 절대 수정하지 않는다. 시즌 전체를 다시 쓰지 않는다.
+이미 해결된 구조 문제를 다시 건드리지 말고, 제공된 서사 지적만 기존 회차의 기존 필드에 패치한다.
+새 인물·새 사망·새 친자관계·새 범인·새 핵심 반전을 추가하지 않는다.
+외부 확인 필요 전문 사실은 단정하지 않는다. 출력은 JSON 객체 하나만 반환한다.""",
+                                        f"""{ctx_after_struct}
+
+# 이번에 해결할 서사 지적
+{json.dumps(narrative_issues, ensure_ascii=False, indent=2)}
+
+# 이전 보완에서 해결된 문제(근거 없이 되살리지 말 것)
+{json.dumps(data.get('season_repair_resolved', []), ensure_ascii=False, indent=2)}
 
 출력 형식:
 {{
-  "edits": [
-    {{"issue_id":"I1", "episode":1, "field":"beats", "value":[], "reason":"왜 이 최소 변경이 필요한지"}}
-  ],
-  "change_summary":["I1 → 최소 수정 → 이유"],
-  "canon_guard":"Canon 사실 자체를 변경하지 않았다는 확인"
+  "edits": [{{"issue_id":"I1", "episode":1, "field":"beats", "value":[], "reason":"최소 변경 이유"}}],
+  "change_summary":["I1 → 수정 → 이유"],
+  "canon_guard":"Canon 변경 없음"
 }}"""
-                                )
-                                patch = extract_json(raw_patch)
-                                edits = patch.get("edits", []) if isinstance(patch, dict) else []
-                                if not isinstance(edits, list) or not edits:
-                                    raise ValueError("보완 결과에 적용 가능한 edits가 없습니다.")
+                                    )
+                                    patch = extract_json(raw_patch)
+                                    edits = patch.get("edits", []) if isinstance(patch, dict) else []
+                                    if not isinstance(edits, list) or not edits:
+                                        raise ValueError("서사 보완 결과에 적용 가능한 edits가 없습니다.")
 
-                                candidate = json.loads(json.dumps(before_plan, ensure_ascii=False))
-                                by_no = {int(ep.get("number", 0) or 0): ep for ep in candidate if isinstance(ep, dict)}
-                                changed_episodes = set()
-                                changed_fields = []
-                                issue_ids = {str(x.get("id")) for x in issues}
-                                for edit in edits:
-                                    if not isinstance(edit, dict):
-                                        continue
-                                    issue_id = str(edit.get("issue_id", ""))
-                                    ep_no = int(edit.get("episode", 0) or 0)
-                                    field = str(edit.get("field", "")).strip()
-                                    if issue_id not in issue_ids:
-                                        raise ValueError(f"감사 지적과 연결되지 않은 패치입니다: {issue_id}")
-                                    if ep_no not in by_no:
-                                        raise ValueError(f"존재하지 않는 회차 패치입니다: {ep_no}")
-                                    if field in {"number"} or field not in by_no[ep_no]:
-                                        raise ValueError(f"{ep_no}화의 허용되지 않은 필드 패치입니다: {field}")
-                                    old_value = by_no[ep_no].get(field)
-                                    new_value = edit.get("value")
-                                    # 스키마 타입을 가능한 한 보존한다.
-                                    if isinstance(old_value, list) and not isinstance(new_value, list):
-                                        raise ValueError(f"{ep_no}화 {field}는 배열이어야 합니다.")
-                                    if isinstance(old_value, dict) and not isinstance(new_value, dict):
-                                        raise ValueError(f"{ep_no}화 {field}는 객체여야 합니다.")
-                                    if old_value != new_value:
-                                        by_no[ep_no][field] = new_value
-                                        changed_episodes.add(ep_no)
-                                        changed_fields.append(f"{ep_no}화.{field}")
+                                    by_no = {int(ep.get("number", 0) or 0): ep for ep in candidate if isinstance(ep, dict)}
+                                    issue_ids = {str(x.get("id")) for x in narrative_issues}
+                                    for edit in edits:
+                                        if not isinstance(edit, dict):
+                                            continue
+                                        issue_id = str(edit.get("issue_id", ""))
+                                        ep_no = int(edit.get("episode", 0) or 0)
+                                        field = str(edit.get("field", "")).strip()
+                                        if issue_id not in issue_ids:
+                                            continue
+                                        if ep_no not in by_no or field in {"number"} or field not in by_no[ep_no]:
+                                            continue
+                                        old_value = by_no[ep_no].get(field)
+                                        new_value = edit.get("value")
+                                        if isinstance(old_value, list) and not isinstance(new_value, list):
+                                            continue
+                                        if isinstance(old_value, dict) and not isinstance(new_value, dict):
+                                            continue
+                                        if old_value != new_value:
+                                            by_no[ep_no][field] = new_value
+                                            changed_episodes.add(ep_no)
+                                            changed_fields.append(f"{ep_no}화.{field}")
 
-                                if not changed_fields:
-                                    raise ValueError("실제 변경된 필드가 없습니다.")
-
-                                # 구조적 잠금 검사: 패치 목록에 없는 모든 값이 byte-level 의미상 동일해야 한다.
-                                for old_ep, new_ep in zip(before_plan, candidate):
-                                    ep_no = int(old_ep.get("number", 0) or 0)
-                                    for key in old_ep.keys():
-                                        tag = f"{ep_no}화.{key}"
-                                        if tag not in changed_fields and old_ep.get(key) != new_ep.get(key):
-                                            raise ValueError(f"허용되지 않은 연쇄 변경 감지: {tag}")
-
-                                status.write("필드 잠금 검사를 통과했습니다. Canon 보호 검사를 실행합니다.")
-                                guard_raw = call_model(
-                                    api_key, model,
-                                    """당신은 Canon 변경 방지 감사관이다.
-수정된 필드만 보고 잠금 Canon의 사실관계가 실제로 바뀌었는지 검사한다.
-감사 지적 해결을 위한 원인-결과 연결, 정보 습득 장면, 기존 단서 명료화, 동기/생활 연속성 보강은 허용한다.
-새 인물·새 사망·새 친자관계·새 범인·새 핵심 반전, Canon의 관계/결말/핵심 진실 변경은 거부한다.
-외부 확인 필요 사실을 확정 사실로 바꾸는 것도 거부한다.
-마지막 줄은 반드시 GUARD: PASS 또는 GUARD: REJECT.""",
-                                    f"""# 잠금 Canon/Story Bible
+                                    if changed_fields:
+                                        narrative_guard = call_model(
+                                            api_key, model,
+                                            """당신은 Canon 변경 방지 감사관이다.
+수정된 회차 필드만 보고 잠금 Canon의 관계/핵심 진실/최종 반전/결말이 바뀌었는지 검사한다.
+원인-결과 연결, 정보 습득 장면, 기존 단서 명료화, 동기와 생활 연속성 보강은 허용한다.
+새 인물·새 사망·새 친자관계·새 범인·새 핵심 반전 또는 외부 확인 사실의 확정은 거부한다.
+마지막 줄은 GUARD: PASS 또는 GUARD: REJECT.""",
+                                            f"""# 잠금 Canon
 {data.get('concept_lab', {}).get('locked_bible', '')}
 
-# 해결 대상 지적
-{json.dumps(issues, ensure_ascii=False, indent=2)}
+# 서사 지적
+{json.dumps(narrative_issues, ensure_ascii=False, indent=2)}
 
-# 실제 변경 필드
-{json.dumps(edits, ensure_ascii=False, indent=2)}
+# 변경 필드
+{json.dumps(edits, ensure_ascii=False, indent=2)}"""
+                                        )
+                                        if "GUARD: PASS" in narrative_guard.upper():
+                                            data["season_plan"] = candidate
+                                            narrative_applied = True
+                                            status.write("서사 패치가 Canon 보호 검사를 통과했습니다: " + ", ".join(changed_fields[:10]))
+                                        else:
+                                            # 2.8.3: 서사 패치만 버리고 안전한 구조 보정은 보존한다.
+                                            data["season_plan"] = before_plan
+                                            changed_episodes.clear()
+                                            changed_fields.clear()
+                                            data["season_last_repair_rejection"] = {
+                                                "at": datetime.now().isoformat(timespec="seconds"),
+                                                "first_guard": narrative_guard,
+                                                "second_guard": "2.8.3은 거부된 서사 패치만 폐기하고 안전한 구조 보정은 유지합니다."
+                                            }
+                                            status.write("서사 패치는 거부됐지만 안전한 구조 보정은 유지합니다.")
 
-Canon 변경 여부와 지적 범위 초과 여부만 검사하라."""
-                                )
-                                if "GUARD: PASS" not in guard_raw.upper():
-                                    data["season_last_repair_rejection"] = {
-                                        "at": datetime.now().isoformat(timespec="seconds"),
-                                        "first_guard": guard_raw,
-                                        "second_guard": "2.8.2는 거부된 패치를 자동 확대 재작성하지 않습니다."
-                                    }
-                                    save_data(data)
-                                    raise ValueError("Canon 보호 검사에서 패치가 거부되었습니다. 거부 사유를 확인하세요.")
+                                any_change = bool(deterministic_changes or structure_ai_changes or narrative_applied)
+                                if not any_change:
+                                    raise ValueError("안전하게 채택할 수 있는 실제 변경이 없습니다.")
 
-                                data["season_plan"] = candidate
+                                # 현재 데이터만으로 독립 재검증한다.
                                 rectx = compact_context(data, last_episode_count=0)
                                 reaudit = call_model(
                                     api_key, model,
                                     """당신은 시즌 전체 continuity 시뮬레이터다.
-각 화를 순서대로 실행해 상태 변화를 추적한다. 확정 Story Bible은 변경할 수 없는 사실이다.
-직전 감사의 문구를 기계적으로 반복하지 말고, 수정된 현재 시즌에 실제로 남아 있는 문제만 보고한다.
-해결된 문제는 다시 지적하지 않는다. 새 지적은 현재 데이터에서 구체적 근거가 있을 때만 추가한다.
-칭찬이나 개선 제안은 쓰지 않는다.""",
+현재 데이터만 기준으로 1화부터 순서대로 검사한다. 잠금 Story Bible은 변경 불가다.
+직전 감사 문구를 반복하지 말고 실제로 남은 문제만 보고한다.
+이전 보완에서 해결된 문제는 현재 데이터에 구체적 모순이 다시 생겼을 때만 재지적한다.
+데이터 구조의 null은 '미확정'이지 오류가 아니다. 외부 확인 필요 항목은 법률효과를 단정했을 때만 문제로 본다.
+마지막 줄은 VERDICT: PASS 또는 VERDICT: REVISE.""",
                                     f"""{rectx}
 
-# 직전 감사에서 해결 대상으로 삼은 문제
+# 직전 문제
 {json.dumps(issues, ensure_ascii=False, indent=2)}
 
-# 이번에 실제 변경된 필드
+# 이번 안전 규칙 보정
+{json.dumps(deterministic_changes + structure_ai_changes, ensure_ascii=False)}
+
+# 이번 서사 변경
 {json.dumps(changed_fields, ensure_ascii=False)}
 
-1화부터 마지막 화까지 다시 검사:
-- 원인 없는 결과 / 정보 선후관계 / 중복 발견
-- 떡밥 심기·회수 / 최종 반전 단서
-- 잠금 Story Bible 충돌 / 시간·이동·나이 모순
-- 합리적 대안 행동을 무시한 억지 전개
-- 외부 확인 필요 사실의 법률·제도 단정
+# 이전에 해결된 문제
+{json.dumps(data.get('season_repair_resolved', []), ensure_ascii=False, indent=2)}
 
-보고서에는 '남은 문제'만 번호로 적고, 각 문제에 근거 회차를 명시하라.
-문제가 없으면 짧게 통과 이유만 적는다.
-마지막 줄은 반드시 VERDICT: PASS 또는 VERDICT: REVISE."""
+검사 항목: 원인 없는 결과, 정보 선후관계, 중복 발견, 떡밥 심기·회수, 반전 단서, Canon 충돌, 시간·이동·나이 모순, 합리적 대안 행동, 외부 확인 사실의 과도한 단정.
+남은 문제만 번호로 쓰고 근거 회차/데이터를 적어라."""
                                 )
 
+                                before_count = count_audit_items(audit_before)
+                                after_count = count_audit_items(reaudit)
+                                # 해결된 것으로 추정되는 문제를 저장하되, 재검증이 구체적으로 되살릴 수는 있다.
+                                if after_count < before_count:
+                                    resolved = data.setdefault("season_repair_resolved", [])
+                                    summary = f"{repair_round + 1}차 보완: 문제 수 {before_count}→{after_count}"
+                                    if summary not in resolved:
+                                        resolved.append(summary)
+
                                 data["season_repair_round"] = repair_round + 1
+                                data["season_repair_engine_version"] = "2.8.3"
                                 data.setdefault("season_repair_history", []).append({
+                                    "engine": "2.8.3",
                                     "round": repair_round + 1,
                                     "at": datetime.now().isoformat(timespec="seconds"),
                                     "audit_before": audit_before,
                                     "issues": issues,
+                                    "structural_issues": structural_issues,
+                                    "narrative_issues": narrative_issues,
+                                    "deterministic_changes": deterministic_changes,
+                                    "structure_ai_changes": structure_ai_changes,
                                     "changed_episodes": sorted(changed_episodes),
                                     "changed_fields": changed_fields,
-                                    "change_summary": patch.get("change_summary", []),
-                                    "guard": guard_raw,
+                                    "change_summary": patch.get("change_summary", []) if isinstance(patch, dict) else [],
+                                    "guard": narrative_guard,
                                     "audit_after": reaudit,
+                                    "before_count": before_count,
+                                    "after_count": after_count,
                                     "before_plan": before_plan,
-                                    "after_plan": candidate
+                                    "after_plan": json.loads(json.dumps(data.get("season_plan", []), ensure_ascii=False))
                                 })
                                 data["season_audit"] = reaudit
                                 data["season_locked"] = False
-                                data.pop("season_last_repair_rejection", None)
                                 save_data(data)
-                                status.update(label="필드 단위 국소 보완 및 독립 재검증 완료", state="complete")
+                                status.update(label=f"하이브리드 보완 완료 · 문제 수 {before_count}→{after_count}", state="complete")
                                 st.rerun()
                             except Exception as e:
+                                # 실패 시 시즌 설계는 복구하되, 이번 시도에서만 생긴 구조 변경도 원복한다.
                                 data["season_plan"] = before_plan
+                                for key, value in before_struct.items():
+                                    data[key] = value
                                 save_data(data)
-                                status.update(label="국소 보완안을 채택하지 않았습니다.", state="error")
+                                status.update(label="안전하게 채택할 보완이 없어 원상복구했습니다.", state="error")
                                 st.error(f"보완 실패: {e}")
                                 if raw_patch:
                                     with st.expander("보완 AI 원문 보기"):
@@ -1874,4 +2078,4 @@ with tabs[10]:
             )
             st.write(result)
 
-st.caption("AI 드라마 작가실 2.8.2 · 거부 사유를 표시하고 Canon 보호 검사 피드백으로 국소 보완안을 자동 재시도합니다. · project.json 저장")
+st.caption("AI 드라마 작가실 2.8.3 · 구조 오류는 안전 규칙으로 직접 보정하고, 서사 오류만 AI가 필드 단위로 국소 수정합니다. · project.json 저장")
