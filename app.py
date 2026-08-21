@@ -605,7 +605,7 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🎬 AI 드라마 작가실 2.8.4")
+st.title("🎬 AI 드라마 작가실 2.9.0")
 st.caption("한 줄 아이디어 → 재미/현실성 조절 → 레드팀 → 사용자 승인 → Canon 잠금 → 시즌/대본")
 
 if "data" not in st.session_state:
@@ -1812,7 +1812,7 @@ knowledge={json.dumps(data.get('knowledge', []), ensure_ascii=False)}
 
 # 8. 회차 집필
 with tabs[9]:
-    st.subheader("✍️ AI 회차 집필 파이프라인")
+    st.subheader("✍️ AI 회차 집필 파이프라인 2.9")
 
     total = int(data["meta"].get("episode_count", 10) or 10)
     next_ep = data["episodes"][-1]["number"] + 1 if data["episodes"] else 1
@@ -1843,8 +1843,8 @@ with tabs[9]:
     )
 
     st.caption(
-        "실행 순서: 회차 설계 → 초고 → 연속성 감사 → 최종 수정 → "
-        "인물 정보 변화 추출"
+        "2.9 실행 순서: 회차 설계 → 초고 → 대사/숏폼 강화 → 연속성 감사 → 최종 수정 → "
+        "최종 게이트 → 다음 화 상태 승계"
     )
 
     if st.button("🎬 이번 화 완성하기", type="primary", use_container_width=True):
@@ -1853,8 +1853,16 @@ with tabs[9]:
         elif not data.get("season_locked", False):
             st.error("먼저 '전체 설계'에서 시즌 구조를 검증하고 🔒 확정하세요.")
         else:
-            ctx = compact_context(data, current_episode=int(ep_no))
-            with st.status("AI 작가실 가동 중", expanded=True) as status:
+            ctx = compact_context(data, current_episode=int(ep_no), last_episode_count=5)
+            previous_ep = next((e for e in data["episodes"] if e.get("number") == int(ep_no) - 1), None)
+            previous_state = previous_ep.get("state_changes", {}) if previous_ep else {}
+            with st.status("AI 작가실 2.9 가동 중", expanded=True) as status:
+                st.write("0/9 사전 잠금 검사: 직전 화 상태와 이번 화 고정 설계 확인")
+                preflight = call_model(
+                    api_key, model,
+                    "당신은 드라마 스크립트 코디네이터다. 새 설정을 만들지 않는다. 잠금 Canon, 이번 화 고정 설계, 직전 화 상태를 비교해 반드시 지킬 사실, 금지할 조기 공개, 반드시 수행할 사건을 짧게 정리한다.",
+                    f"{ctx}\n\n직전 화 상태:\n{json.dumps(previous_state, ensure_ascii=False, indent=2)}\n\n대상: {int(ep_no)}화"
+                )
                 st.write("1/5 구성 작가: 전체 설계를 촬영 가능한 비트로 구체화")
                 outline = call_model(
                     api_key,
@@ -1866,6 +1874,7 @@ with tabs[9]:
                     f"""{ctx}
 
 대상: {int(ep_no)}화
+사전 잠금 검사: {preflight}
 사용자 추가 지시: {extra}
 
 60~120초 기준으로 오프닝 훅, 4~7개 비트, 감정 전환,
@@ -1933,7 +1942,29 @@ with tabs[9]:
 대본 뒤에는 별도 해설을 길게 붙이지 마라."""
                 )
 
-                st.write("7/7 스크립트 슈퍼바이저: 이번 화의 상태 변화 추출")
+                st.write("7/9 최종 게이트: Canon·고정 설계·정보 공개 시점 재검사")
+                gate_raw = call_model(
+                    api_key, model,
+                    "당신은 최종 방송 전 스크립트 슈퍼바이저다. 잠금 Canon과 이번 화 고정 설계를 기준으로 최종 대본을 검사한다. 새 설정을 만들지 말고 JSON 객체만 반환한다.",
+                    f"{ctx}\n\n사전 잠금 검사:\n{preflight}\n\n최종 대본:\n{final}\n\nJSON 형식: {{\"pass\": true, \"fatal_issues\": [], \"missing_required_beats\": [], \"spoilers\": [], \"continuity_issues\": []}}"
+                )
+                try:
+                    gate = extract_json(gate_raw)
+                    if not isinstance(gate, dict):
+                        gate = {"pass": False, "fatal_issues": ["최종 게이트 JSON 해석 실패"]}
+                except Exception:
+                    gate = {"pass": False, "fatal_issues": ["최종 게이트 JSON 해석 실패"], "raw": gate_raw}
+
+                if not gate.get("pass", False):
+                    st.write("8/9 최종 교정: 게이트 지적만 1회 최소 수정")
+                    final = call_model(
+                        api_key, model,
+                        "당신은 최종 교정 편집장이다. 게이트가 지적한 오류만 최소 수정한다. Canon, 사건 순서, 공개 시점, 클리프행어는 바꾸지 않는다. 대본만 출력한다.",
+                        f"{ctx}\n\n대본:\n{final}\n\n게이트 지적:\n{json.dumps(gate, ensure_ascii=False, indent=2)}"
+                    )
+                    gate["auto_corrected_once"] = True
+
+                st.write("9/9 스크립트 슈퍼바이저: 다음 화로 승계할 상태 변화 추출")
                 state_raw = call_model(
                     api_key,
                     model,
@@ -1959,7 +1990,10 @@ with tabs[9]:
   ],
   "planted_clues": ["실제로 심어진 떡밥"],
   "paid_off_clues": ["실제로 회수된 떡밥"],
-  "character_state_changes": ["관계/감정/상태 변화"]
+  "character_state_changes": ["관계/감정/상태 변화"],
+  "end_locations": [{"person": "인물 이름", "location": "회차 종료 시 위치"}],
+  "open_conflicts": ["다음 화에 이어질 미해결 충돌"],
+  "next_episode_must_remember": ["다음 화가 반드시 이어받을 상태"]
 }}"""
                 )
 
@@ -1980,6 +2014,9 @@ with tabs[9]:
                     "audit": audit,
                     "final": final,
                     "state_changes": state,
+                    "preflight": preflight,
+                    "final_gate": gate,
+                    "pipeline_version": "2.9.0",
                     "created_at": datetime.now().isoformat(timespec="seconds"),
                 }
 
@@ -2005,7 +2042,9 @@ with tabs[9]:
             st.markdown("### 최종 대본")
             st.write(final)
 
-            with st.expander("이번 화 상태 변화"):
+            with st.expander("🔐 2.9 최종 게이트"):
+                st.json(gate)
+            with st.expander("↪ 다음 화로 승계할 상태"):
                 st.json(state)
             with st.expander("설정 감사 보고서"):
                 st.write(audit)
@@ -2026,7 +2065,10 @@ with tabs[9]:
             with st.expander(f"{ep.get('number')}화 · {ep.get('objective','')[:60]}"):
                 st.markdown("#### 최종본")
                 st.write(ep.get("final", ""))
-                st.markdown("#### 상태 변화")
+                if ep.get("final_gate"):
+                    st.markdown("#### 최종 게이트")
+                    st.json(ep.get("final_gate", {}))
+                st.markdown("#### 상태 변화 / 다음 화 승계")
                 st.json(ep.get("state_changes", {}))
                 st.markdown("#### 설정 감사")
                 st.write(ep.get("audit", ""))
@@ -2068,4 +2110,4 @@ with tabs[10]:
             )
             st.write(result)
 
-st.caption("AI 드라마 작가실 2.8.4 · Canon 인물/관계/핵심 설정은 불변 잠금하고, 시즌·연표·정보 흐름의 허용 영역만 국소 보정합니다. · project.json 저장")
+st.caption("AI 드라마 작가실 2.9.0 · Canon 잠금 + 회차 최종 게이트 + 다음 화 상태 승계 · project.json 저장")
