@@ -1460,7 +1460,86 @@ REVISE 지적과 무관한 통과 구조를 바꾸는 대수술도 금지한다.
 지적 해결에 필요한 최소 변경인지 독립 검사하라."""
                                 )
                                 if "GUARD: PASS" not in guard_raw.upper():
-                                    raise ValueError("Canon 보호 검사에서 수정안이 거부되었습니다.\n\n" + guard_raw)
+                                    # 2.8.1: 첫 후보가 과보완이면 감사관의 거부 사유를 이용해 한 번 더 축소 패치한다.
+                                    status.write("첫 보완안이 Canon 보호 검사에서 보류되었습니다. 거부 사유를 반영해 더 작은 수정안으로 재시도합니다.")
+                                    retry_raw = call_model(
+                                        api_key, model,
+                                        """당신은 드라마 시즌 설계의 초미세 패치 담당자다.
+잠금 Canon과 기존 시즌의 통과 요소는 절대 변경하지 않는다.
+아래 Canon 감사관의 거부 사유를 해소하는 데 필요한 문장/필드만 수정한다.
+새 인물·새 사망·새 친자관계·새 범인·새 핵심 반전을 추가하지 않는다.
+인물의 이름/성별/관계/욕망/나이 등 Canon 사실을 재정의하지 않는다.
+외부 확인 필요 전문 사실은 단정하지 않는다.
+출력은 설명 없이 오직 유효한 JSON 객체 하나만 반환한다.""",
+                                        f"""# 잠금 Canon/Story Bible
+{data.get('concept_lab', {}).get('locked_bible', '')}
+
+# 원래 시즌 설계
+{json.dumps(before_plan, ensure_ascii=False, indent=2)}
+
+# 원래 REVISE 지적사항
+{audit_before}
+
+# 첫 후보에 대한 Canon 감사관 거부 사유
+{guard_raw}
+
+# 작업
+원래 시즌 설계를 기준으로, 위 REVISE 중 Canon을 바꾸지 않고 고칠 수 있는 항목만 최소 수정하라.
+Canon과 충돌하는 지적은 시즌 데이터의 잘못된 입력값을 Canon에 맞게 바로잡는 방식으로만 처리하라.
+반드시 정확히 {total}개 회차를 유지하라.
+
+출력 형식:
+{{
+  "season_plan": [기존과 동일한 스키마의 {total}개 회차 객체],
+  "changed_episodes": [실제로 수정한 회차 번호],
+  "change_summary": ["지적 → 최소 수정 → 이유"],
+  "canon_guard": "Canon 사실 자체는 변경하지 않았다는 확인"
+}}"""
+                                    )
+                                    retry_patch = extract_json(retry_raw)
+                                    retry_candidate = retry_patch.get("season_plan") if isinstance(retry_patch, dict) else None
+                                    if not isinstance(retry_candidate, list):
+                                        raise ValueError("재시도 결과에 season_plan 배열이 없습니다.\n\n[첫 Canon 거부 사유]\n" + guard_raw)
+                                    retry_candidate = [x for x in retry_candidate if isinstance(x, dict)]
+                                    retry_candidate.sort(key=lambda x: int(x.get("number", 0) or 0))
+                                    retry_nums = [int(x.get("number", 0) or 0) for x in retry_candidate]
+                                    if len(retry_candidate) != total or retry_nums != list(range(1, total + 1)):
+                                        raise ValueError(f"재시도 회차 수/번호가 잘못되었습니다: {retry_nums}")
+
+                                    guard2_raw = call_model(
+                                        api_key, model,
+                                        """당신은 Canon 변경 방지 감사관이다.
+'표현이 달라졌다'는 이유만으로 거부하지 말고, 잠금 Canon의 사실관계가 실제로 바뀌었는지를 검사한다.
+시즌 데이터에 Canon과 충돌하는 잘못된 입력값이 있었다면 Canon에 맞게 제거·교정하는 것은 허용한다.
+REVISE를 해결하기 위한 원인-결과 연결, 정보 습득 장면, 기존 단서 명료화, 동기 보강, 생활 연속성 보강은 허용한다.
+새 인물·새 사망·새 친자관계·새 범인·새 핵심 반전 추가, Canon의 관계/결말/핵심 진실 변경은 거부한다.
+외부 확인 필요 사실을 확정 사실로 바꾸는 것도 거부한다.
+마지막 줄은 반드시 GUARD: PASS 또는 GUARD: REJECT.""",
+                                        f"""# 잠금 Canon/Story Bible
+{data.get('concept_lab', {}).get('locked_bible', '')}
+
+# 기존 시즌 설계
+{json.dumps(before_plan, ensure_ascii=False, indent=2)}
+
+# REVISE 지적사항
+{audit_before}
+
+# 축소 재시도 후보
+{json.dumps(retry_candidate, ensure_ascii=False, indent=2)}
+
+Canon 사실 변경 여부만 중심으로 검사하라."""
+                                    )
+                                    if "GUARD: PASS" not in guard2_raw.upper():
+                                        data["season_last_repair_rejection"] = {
+                                            "at": datetime.now().isoformat(timespec="seconds"),
+                                            "first_guard": guard_raw,
+                                            "second_guard": guard2_raw
+                                        }
+                                        save_data(data)
+                                        raise ValueError("Canon 보호 검사에서 두 후보가 모두 거부되었습니다.\n\n[1차 거부 사유]\n" + guard_raw + "\n\n[2차 거부 사유]\n" + guard2_raw)
+                                    candidate = retry_candidate
+                                    patch = retry_patch
+                                    guard_raw = guard2_raw
 
                                 # 후보를 임시 반영한 뒤 전체 연속성을 다시 검사한다.
                                 data["season_plan"] = candidate
@@ -1513,6 +1592,17 @@ REVISE 지적과 무관한 통과 구조를 바꾸는 대수술도 금지한다.
                                     st.write(raw_patch)
                 elif repair_round >= max_repairs:
                     st.error("자동 국소 보완 5회를 모두 사용했습니다. 남은 문제는 직접 확인한 뒤 시즌 설계를 수정하세요.")
+
+        if data.get("season_last_repair_rejection"):
+            with st.expander("⚠️ 최근 국소 보완 거부 사유 보기"):
+                rej = data.get("season_last_repair_rejection", {})
+                st.caption(rej.get("at", ""))
+                if rej.get("first_guard"):
+                    st.markdown("**1차 Canon 보호 검사**")
+                    st.write(rej.get("first_guard"))
+                if rej.get("second_guard"):
+                    st.markdown("**2차 Canon 보호 검사**")
+                    st.write(rej.get("second_guard"))
 
         if data.get("season_repair_history"):
             with st.expander("🧾 시즌 보완 이력 보기"):
@@ -1783,4 +1873,4 @@ with tabs[10]:
             )
             st.write(result)
 
-st.caption("AI 드라마 작가실 2.8 · 검증 이력과 최종 Canon을 분리하고, 정제된 Canon만 Story Bible과 집필 기준으로 사용합니다. · project.json 저장")
+st.caption("AI 드라마 작가실 2.8.1 · 거부 사유를 표시하고 Canon 보호 검사 피드백으로 국소 보완안을 자동 재시도합니다. · project.json 저장")
