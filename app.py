@@ -47,6 +47,11 @@ DEFAULT_DATA = {
         "revision_note":"",
         "revision_approved":False,
         "reaudit":"",
+        "refine_note":"",
+        "refine_round":0,
+        "refine_history":[],
+        "external_checks":[],
+        "conditional_canon":False,
         "locked":False,
         "locked_bible":"",
         "locked_at":""
@@ -171,6 +176,10 @@ def compact_context(data, current_episode=None, last_episode_count=4):
 
 # 잠금된 기획 바이블
 {data.get('concept_lab', {}).get('locked_bible', '') or "아직 잠금된 기획 없음"}
+
+# 외부 확인이 필요한 미검증 전문 사실
+{json.dumps(data.get('concept_lab', {}).get('external_checks', []), ensure_ascii=False, indent=2)}
+주의: 위 항목은 Canon의 확정 전문 사실이 아니다. 확인 전에는 법률/제도 결론을 단정하거나 핵심 사건 해결 근거로 사용하지 말 것.
 
 # 작품 바이블
 제목: {meta.get('title','')}
@@ -362,7 +371,8 @@ def build_bible_from_locked_concept(api_key, model, data):
     total = int(data.get("meta", {}).get("episode_count", 10) or 10)
     raw = call_model(api_key, model,
         """당신은 드라마 제작실의 Story Bible 편집자다. 잠금된 기획의 사실을 바꾸지 말고 구조화만 한다. 새로운 핵심 반전, 친자관계, 범인, 혼인관계, 사망 여부를 임의로 추가하지 않는다. 불확실한 전문 사실을 확정 사실로 승격하지 않는다. 출력은 설명 없이 오직 유효한 JSON 객체 하나만 반환한다.""",
-        f"""잠금된 기획:\n{locked}\n\n작가실 규칙:\n{rules}\n\n다음 JSON 스키마로 구조화하라.\n{{\n  \"meta\": {{\"title\":\"제목\",\"genre\":\"장르\",\"format\":\"숏폼 {total}부작, 회당 분량\",\"tone\":\"톤과 문체\",\"premise\":\"공개 가능한 기본 설정/로그라인\",\"final_truth\":\"작가만 아는 전체 진실\",\"episode_count\":{total}}},\n  \"characters\": [{{\"name\":\"이름\",\"age\":35,\"birth_year\":null,\"role\":\"역할\",\"biological_mother\":\"\",\"biological_father\":\"\",\"raised_by\":\"\",\"secret\":\"숨기는 사실\",\"desire\":\"욕망/목표\"}}],\n  \"relationships\": [{{\"a\":\"인물A\",\"b\":\"인물B\",\"type\":\"관계\",\"detail\":\"설명\"}}],\n  \"timeline\": [{{\"year\":\"시점 또는 연도\",\"event\":\"사건\",\"person\":\"관련 인물\",\"known_by\":\"현재 알고 있는 인물\"}}],\n  \"foreshadowing\": [{{\"clue\":\"떡밥\",\"planted_episode\":1,\"payoff_episode\":5,\"truth\":\"실제 의미\",\"status\":\"미회수\"}}],\n  \"knowledge\": [{{\"person\":\"인물\",\"fact\":\"본편 시작 전에 이미 아는 사실\",\"learned_episode\":0,\"source\":\"알게 된 이유\"}}]\n}}\n잠금 기획에 없는 구체적 혈연/법률관계를 임의 생성하지 마라. final_truth에는 잠금 기획의 정답을 빠뜨리지 마라. premise에는 최종 반전을 노출하지 마라.""")
+        f"""잠금된 기획:\n{locked}\n\n작가실 규칙:\n{rules}\n\n다음 JSON 스키마로 구조화하라.\n{{\n  \"meta\": {{\"title\":\"제목\",\"genre\":\"장르\",\"format\":\"숏폼 {total}부작, 회당 분량\",\"tone\":\"톤과 문체\",\"premise\":\"공개 가능한 기본 설정/로그라인\",\"final_truth\":\"작가만 아는 전체 진실\",\"episode_count\":{total}}},\n  \"characters\": [{{\"name\":\"이름\",\"age\":35,\"birth_year\":null,\"role\":\"역할\",\"biological_mother\":\"\",\"biological_father\":\"\",\"raised_by\":\"\",\"secret\":\"숨기는 사실\",\"desire\":\"욕망/목표\"}}],\n  \"relationships\": [{{\"a\":\"인물A\",\"b\":\"인물B\",\"type\":\"관계\",\"detail\":\"설명\"}}],\n  \"timeline\": [{{\"year\":\"시점 또는 연도\",\"event\":\"사건\",\"person\":\"관련 인물\",\"known_by\":\"현재 알고 있는 인물\"}}],\n  \"foreshadowing\": [{{\"clue\":\"떡밥\",\"planted_episode\":1,\"payoff_episode\":5,\"truth\":\"실제 의미\",\"status\":\"미회수\"}}],\n  \"knowledge\": [{{\"person\":\"인물\",\"fact\":\"본편 시작 전에 이미 아는 사실\",\"learned_episode\":0,\"source\":\"알게 된 이유\"}}]\n}}\n잠금 기획에 없는 구체적 혈연/법률관계를 임의 생성하지 마라. final_truth에는 잠금 기획의 정답을 빠뜨리지 마라. premise에는 최종 반전을 노출하지 마라.
+외부 확인이 필요하다고 표시된 법률·제도 사항은 확정 Canon 사실처럼 구체화하지 말고, 필요하면 일반적 표현으로 유지하라.""")
     return normalize_bible_payload(extract_json(raw), total)
 
 def build_audit_digest(api_key, model, audit_text):
@@ -422,7 +432,7 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🎬 AI 드라마 작가실 2.4")
+st.title("🎬 AI 드라마 작가실 2.5")
 st.caption("한 줄 아이디어 → 재미/현실성 조절 → 레드팀 → 사용자 승인 → Canon 잠금 → 시즌/대본")
 
 if "data" not in st.session_state:
@@ -553,6 +563,11 @@ with tabs[0]:
             lab["revised"] = ""
             lab["revision_approved"] = False
             lab["reaudit"] = ""
+            lab["refine_note"] = ""
+            lab["refine_round"] = 0
+            lab["refine_history"] = []
+            lab["external_checks"] = []
+            lab["conditional_canon"] = False
             lab["locked"] = False
             lab["locked_bible"] = ""
             save_data(data)
@@ -647,6 +662,11 @@ with tabs[0]:
             )
             lab["revision_approved"] = False
             lab["reaudit"] = ""
+            lab["refine_note"] = ""
+            lab["refine_round"] = 0
+            lab["refine_history"] = []
+            lab["external_checks"] = []
+            lab["conditional_canon"] = False
             save_data(data)
             st.rerun()
 
@@ -693,9 +713,93 @@ with tabs[0]:
     if lab.get("reaudit"):
         st.markdown("### 독립 재검증")
         st.write(lab["reaudit"])
-        verdict_pass = "VERDICT: PASS" in lab["reaudit"].upper() and lab.get("revision_approved", False)
+
+        verdict_text = lab["reaudit"].upper()
+        verdict_pass = "VERDICT: PASS" in verdict_text and "CONDITIONAL PASS" not in verdict_text and lab.get("revision_approved", False)
+        verdict_conditional = "VERDICT: CONDITIONAL PASS" in verdict_text and lab.get("revision_approved", False)
+        verdict_needs_work = ("VERDICT: REVISE" in verdict_text or "VERDICT: REJECT" in verdict_text or verdict_conditional)
+
         if verdict_pass:
             st.success("독립 재검증 PASS. 이제 사용자가 최종 승인하면 Canon으로 잠글 수 있습니다.")
+
+        if verdict_needs_work:
+            st.warning("2.5에서는 처음부터 다시 만들지 않습니다. 현재 승인본을 유지하고, 재검증에서 실패한 항목만 보완할 수 있습니다.")
+            lab["refine_note"] = st.text_area(
+                "보완 지시 (선택)",
+                lab.get("refine_note", ""),
+                placeholder="예: 통과한 친자 시간선과 핵심 반전은 건드리지 말고, DNA 검사 회피 이유와 이사회 권력 구조만 보완."
+            )
+            if st.button("🔧 지적사항만 보완하기", use_container_width=True):
+                if not api_key:
+                    st.error("OpenAI API Key가 필요합니다.")
+                else:
+                    rules = json.dumps(data["writer_rules"], ensure_ascii=False, indent=2)
+                    previous = lab["revised"]
+                    refined = call_model(
+                        api_key, model,
+                        """당신은 드라마 기획의 국소 수정 편집자다.
+현재 사용자가 승인한 기획의 이미 통과한 항목은 잠긴 것으로 취급한다.
+재검증 보고서에서 '보완 필요', '필수 수정', '핵심 검증 필요'로 남은 항목만 최소 수정한다.
+이미 '통과' 또는 '대체로 통과'한 설정, 핵심 훅, 인물 관계, 최종 반전, 시간선을 임의로 바꾸지 않는다.
+새 인물, 새 친자관계, 새 사망, 새 범인, 구체적 지분율·금액·법률 절차를 불필요하게 추가하지 않는다.
+전문 사실이 외부 확인을 필요로 하면 억지로 확정하지 말고 [외부 확인 필요]로 표시한다.
+수정 뒤에는 무엇을 유지했고 무엇만 바꿨는지 분명히 적는다.""",
+                        f"""현재 승인 기획:
+{previous}
+
+독립 재검증 보고서:
+{lab['reaudit']}
+
+작가실 규칙:
+{rules}
+
+작품 성향:
+{creative_controls_text(data)}
+
+사용자 추가 보완 지시:
+{lab.get('refine_note','') or '없음'}
+
+출력 형식:
+1) 절대 유지한 항목
+2) 이번에 보완한 항목 (재검증 지적 → 수정 → 이유)
+3) 외부 확인 필요 항목
+4) 보완된 통합 기획안
+5) 변경 범위 점검: 통과 항목을 건드렸는지 스스로 확인
+
+핵심 원칙: '전면 재작성'이 아니라 '실패 항목 패치'다."""
+                    )
+                    history = lab.get("refine_history", [])
+                    if not isinstance(history, list):
+                        history = []
+                    history.append({
+                        "round": int(lab.get("refine_round", 0)) + 1,
+                        "before": previous,
+                        "audit": lab["reaudit"],
+                        "after": refined,
+                        "at": datetime.now().isoformat(timespec="seconds"),
+                    })
+                    lab["refine_history"] = history[-6:]
+                    lab["refine_round"] = int(lab.get("refine_round", 0)) + 1
+                    lab["revised"] = refined
+                    lab["revision_approved"] = False
+                    lab["reaudit"] = ""
+                    lab["conditional_canon"] = False
+                    save_data(data)
+                    st.rerun()
+
+        if verdict_conditional:
+            st.info("조건부 통과입니다. 이야기 논리는 충분하지만, 법률·제도 등 외부 사실 확인이 남아 있을 수 있습니다.")
+            if st.button("⚠️ 외부 확인 항목을 남기고 조건부 Canon 허용", use_container_width=True):
+                lab["conditional_canon"] = True
+                # 보고서 자체를 검증 필요 기록으로 남긴다. Story Bible 변환 시에도 모델이 확정 사실로 승격하지 않도록 한다.
+                lab["external_checks"] = [lab["reaudit"]]
+                save_data(data)
+                st.rerun()
+
+        can_lock = verdict_pass or (verdict_conditional and lab.get("conditional_canon", False))
+        if can_lock:
+            if lab.get("conditional_canon", False):
+                st.warning("조건부 Canon: 외부 확인이 끝나지 않은 전문 사실은 미확정 상태입니다. 집필 시 단정적으로 사용하지 않습니다.")
             if st.button("🔒 이 설정 확정 + Story Bible 자동 생성", type="primary", use_container_width=True):
                 if not api_key:
                     st.error("OpenAI API Key가 필요합니다.")
@@ -719,12 +823,20 @@ with tabs[0]:
                             save_data(data)
                             status.update(label="Story Bible 생성 실패", state="error")
                             st.error(f"자동 구조화 오류: {e}")
-        else:
-            st.warning("아직 자동 잠금 조건을 통과하지 못했습니다. 지적 사항을 반영해 다시 수정/검증하세요.")
+
+    if lab.get("refine_round", 0):
+        st.caption(f"국소 보완 {lab.get('refine_round',0)}회 수행 · 통과 항목 보존 모드")
+        with st.expander("보완 이력 보기"):
+            for h in lab.get("refine_history", []):
+                st.write(f"**{h.get('round')}차 보완 · {h.get('at','')}**")
+                st.write(h.get("after",""))
 
     if lab.get("locked"):
         st.divider()
-        st.success(f"🔒 Story Bible 잠금 완료 · {lab.get('locked_at','')}")
+        if lab.get("conditional_canon", False):
+            st.warning(f"⚠️ 조건부 Story Bible 잠금 완료 · {lab.get('locked_at','')}")
+        else:
+            st.success(f"🔒 Story Bible 잠금 완료 · {lab.get('locked_at','')}")
         st.info(f"자동 구축됨: 인물 {len(data['characters'])}명 · 관계 {len(data['relationships'])}개 · 연표 {len(data['timeline'])}개 · 떡밥 {len(data['foreshadowing'])}개 · 초기 정보 {len(data['knowledge'])}개")
         with st.expander("잠금된 바이블 보기"):
             st.write(lab.get("locked_bible", ""))
@@ -1395,4 +1507,4 @@ with tabs[10]:
             )
             st.write(result)
 
-st.caption("AI 드라마 작가실 2.4 · 검증 결과를 요약하고 사용자 승인 후 Canon으로 잠급니다. · project.json 저장")
+st.caption("AI 드라마 작가실 2.5 · 재검증 실패 항목만 보완하고, 외부 확인 항목은 조건부 Canon으로 관리합니다. · project.json 저장")
