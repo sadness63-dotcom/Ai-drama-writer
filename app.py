@@ -53,6 +53,9 @@ DEFAULT_DATA = {
         "external_checks":[],
         "conditional_canon":False,
         "locked":False,
+        "raw_locked_candidate":"",
+        "canon_master":"",
+        "canon_refined_at":"",
         "locked_bible":"",
         "locked_at":""
     },
@@ -362,15 +365,84 @@ def apply_bible_to_project(data, bible):
     data["season_locked"] = False
     data["season_audit"] = ""
 
+def refine_canon_master(api_key, model, data, source_text=None):
+    """검증/수정 이력을 제거하고 최종 확정 사실만 Canon 문서로 정제한다."""
+    lab = data["concept_lab"]
+    source = (source_text or lab.get("revised") or lab.get("locked_bible") or "").strip()
+    if not source:
+        raise ValueError("정제할 확정 기획이 없습니다.")
+    rules = json.dumps(data.get("writer_rules", []), ensure_ascii=False, indent=2)
+    external = "\n\n".join(str(x) for x in lab.get("external_checks", []) if str(x).strip())
+    raw = call_model(api_key, model,
+        """당신은 드라마 제작실의 Canon 편집자다. 입력에는 최종 기획뿐 아니라 검증 보고서, 수정 이유, 변경 이력, 자기점검 문구가 섞여 있을 수 있다.
+당신의 임무는 '작품 세계에서 실제로 참인 최종 설정'만 추출해 하나의 깨끗한 Canon 문서로 만드는 것이다.
+
+절대 규칙:
+- 검증 보고서, REVISE/PASS 판정, 수정 이유, 패치 범위, 보완 회차, 자기점검 문구는 Canon에 넣지 않는다.
+- 입력에 없는 새 인물, 새 친자관계, 새 범인, 새 사망, 새 반전을 만들지 않는다.
+- 서로 다른 과거안이 충돌하면 가장 뒤에 명시된 최종 통합 기획을 우선한다.
+- [외부 확인 필요]인 법률·제도·의학·회사 실무는 확정 사실로 승격하지 않고 반드시 별도 '외부 확인 필요' 섹션에 남긴다.
+- 최종 반전과 작가만 아는 진실은 빠뜨리지 않는다.
+- 설명이나 평가 없이 Canon 문서만 출력한다.""",
+        f"""정제 대상 원문:
+{source}
+
+외부 확인 기록(있으면 참고하되 검증 보고서 자체를 복사하지 말 것):
+{external or '없음'}
+
+작가실 규칙:
+{rules}
+
+다음 순서의 Markdown Canon 문서로 정리하라.
+# 작품 Canon
+## 작품 개요
+- 제목
+- 장르/형식
+- 공개 로그라인
+
+## 절대 변경 금지 진실
+최종 반전, 실제 친자/사망/혼인/범인 등 작가만 아는 확정 사실.
+
+## 인물
+각 인물의 역할, 욕망, 약점, 비밀.
+
+## 관계
+확정된 관계와 서로의 오인/비밀을 구분.
+
+## 시간선
+사건 발생 순서와 필요한 시점.
+
+## 회사/권력 구조
+작품에서 확정한 직위와 권력관계만. 외부 확인이 필요한 세부 법률효과는 확정하지 말 것.
+
+## 1~10화 핵심 사건
+회차별 확정 사건만 간결하게.
+
+## 떡밥과 회수
+심어야 할 단서와 회수 시점.
+
+## 집필 금지/주의
+확정 설정을 깨는 대표적 금지사항.
+
+## 외부 확인 필요
+아직 미확정인 전문 사실만 항목화.
+
+검증 과정이나 수정 이력은 절대 포함하지 마라.""")
+    text = raw.strip()
+    if not text:
+        raise ValueError("Canon 정제 결과가 비어 있습니다.")
+    return text
+
+
 def build_bible_from_locked_concept(api_key, model, data):
     lab = data["concept_lab"]
-    locked = lab.get("locked_bible", "").strip()
+    locked = (lab.get("canon_master") or lab.get("locked_bible", "")).strip()
     if not locked:
-        raise ValueError("잠금된 기획이 없습니다.")
+        raise ValueError("잠금된 Canon이 없습니다.")
     rules = json.dumps(data.get("writer_rules", []), ensure_ascii=False, indent=2)
     total = int(data.get("meta", {}).get("episode_count", 10) or 10)
     raw = call_model(api_key, model,
-        """당신은 드라마 제작실의 Story Bible 편집자다. 잠금된 기획의 사실을 바꾸지 말고 구조화만 한다. 새로운 핵심 반전, 친자관계, 범인, 혼인관계, 사망 여부를 임의로 추가하지 않는다. 불확실한 전문 사실을 확정 사실로 승격하지 않는다. 출력은 설명 없이 오직 유효한 JSON 객체 하나만 반환한다.""",
+        """당신은 드라마 제작실의 Story Bible 편집자다. 정제된 Canon의 사실을 바꾸지 말고 구조화만 한다. 새로운 핵심 반전, 친자관계, 범인, 혼인관계, 사망 여부를 임의로 추가하지 않는다. 불확실한 전문 사실을 확정 사실로 승격하지 않는다. 출력은 설명 없이 오직 유효한 JSON 객체 하나만 반환한다.""",
         f"""잠금된 기획:\n{locked}\n\n작가실 규칙:\n{rules}\n\n다음 JSON 스키마로 구조화하라.\n{{\n  \"meta\": {{\"title\":\"제목\",\"genre\":\"장르\",\"format\":\"숏폼 {total}부작, 회당 분량\",\"tone\":\"톤과 문체\",\"premise\":\"공개 가능한 기본 설정/로그라인\",\"final_truth\":\"작가만 아는 전체 진실\",\"episode_count\":{total}}},\n  \"characters\": [{{\"name\":\"이름\",\"age\":35,\"birth_year\":null,\"role\":\"역할\",\"biological_mother\":\"\",\"biological_father\":\"\",\"raised_by\":\"\",\"secret\":\"숨기는 사실\",\"desire\":\"욕망/목표\"}}],\n  \"relationships\": [{{\"a\":\"인물A\",\"b\":\"인물B\",\"type\":\"관계\",\"detail\":\"설명\"}}],\n  \"timeline\": [{{\"year\":\"시점 또는 연도\",\"event\":\"사건\",\"person\":\"관련 인물\",\"known_by\":\"현재 알고 있는 인물\"}}],\n  \"foreshadowing\": [{{\"clue\":\"떡밥\",\"planted_episode\":1,\"payoff_episode\":5,\"truth\":\"실제 의미\",\"status\":\"미회수\"}}],\n  \"knowledge\": [{{\"person\":\"인물\",\"fact\":\"본편 시작 전에 이미 아는 사실\",\"learned_episode\":0,\"source\":\"알게 된 이유\"}}]\n}}\n잠금 기획에 없는 구체적 혈연/법률관계를 임의 생성하지 마라. final_truth에는 잠금 기획의 정답을 빠뜨리지 마라. premise에는 최종 반전을 노출하지 마라.
 외부 확인이 필요하다고 표시된 법률·제도 사항은 확정 Canon 사실처럼 구체화하지 말고, 필요하면 일반적 표현으로 유지하라.""")
     return normalize_bible_payload(extract_json(raw), total)
@@ -432,7 +504,7 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🎬 AI 드라마 작가실 2.6")
+st.title("🎬 AI 드라마 작가실 2.7")
 st.caption("한 줄 아이디어 → 재미/현실성 조절 → 레드팀 → 사용자 승인 → Canon 잠금 → 시즌/대본")
 
 if "data" not in st.session_state:
@@ -727,7 +799,7 @@ with tabs[0]:
             st.success("독립 재검증 PASS. 이제 사용자가 최종 승인하면 Canon으로 잠글 수 있습니다.")
 
         if verdict_needs_work:
-            st.warning("2.5에서는 처음부터 다시 만들지 않습니다. 현재 승인본을 유지하고, 재검증에서 실패한 항목만 보완할 수 있습니다.")
+            st.warning("현재 승인본을 유지하고, 재검증에서 실패한 항목만 국소 보완할 수 있습니다.")
             lab["refine_note"] = st.text_area(
                 "보완 지시 (선택)",
                 lab.get("refine_note", ""),
@@ -811,24 +883,33 @@ with tabs[0]:
                     st.error("OpenAI API Key가 필요합니다.")
                 else:
                     lab["locked"] = True
-                    lab["locked_bible"] = lab["revised"]
+                    lab["raw_locked_candidate"] = lab["revised"]
                     lab["locked_at"] = datetime.now().isoformat(timespec="seconds")
                     data["season_locked"] = False
                     save_data(data)
-                    with st.status("확정 기획을 Story Bible로 자동 변환 중", expanded=True) as status:
+                    with st.status("Canon 정제 → Story Bible 자동 생성 중", expanded=True) as status:
                         try:
+                            canon = refine_canon_master(api_key, model, data, lab["raw_locked_candidate"])
+                            lab["canon_master"] = canon
+                            lab["canon_refined_at"] = datetime.now().isoformat(timespec="seconds")
+                            # 하위 기능과 구버전 호환을 위해 locked_bible도 정제 Canon만 가리킨다.
+                            lab["locked_bible"] = canon
+                            save_data(data)
+                            status.write("검증 보고서·수정 이력을 제거하고 최종 설정만 Canon으로 정제했습니다.")
                             bible = build_bible_from_locked_concept(api_key, model, data)
                             apply_bible_to_project(data, bible)
                             save_data(data)
-                            status.update(label="Story Bible 자동 생성 완료", state="complete")
-                            st.success("작품·인물·관계·연표·떡밥·정보 장부가 자동으로 채워졌습니다.")
+                            status.update(label="Canon 정제 + Story Bible 생성 완료", state="complete")
+                            st.success("최종 Canon만 기준으로 작품·인물·관계·연표·떡밥·정보 장부를 다시 구축했습니다.")
                         except Exception as e:
                             lab["locked"] = False
+                            lab["canon_master"] = ""
+                            lab["canon_refined_at"] = ""
                             lab["locked_bible"] = ""
                             lab["locked_at"] = ""
                             save_data(data)
-                            status.update(label="Story Bible 생성 실패", state="error")
-                            st.error(f"자동 구조화 오류: {e}")
+                            status.update(label="Canon 정제/Story Bible 생성 실패", state="error")
+                            st.error(f"자동 정제 오류: {e}")
 
     if lab.get("refine_round", 0):
         st.caption(f"국소 보완 {lab.get('refine_round',0)}회 수행 · 통과 항목 보존 모드")
@@ -843,9 +924,44 @@ with tabs[0]:
             st.warning(f"⚠️ 조건부 Story Bible 잠금 완료 · {lab.get('locked_at','')}")
         else:
             st.success(f"🔒 Story Bible 잠금 완료 · {lab.get('locked_at','')}")
+
+        # 2.6에서 이미 잠근 프로젝트는 검증/수정 이력이 locked_bible에 섞여 있을 수 있다.
+        # 2.7에서는 한 번의 버튼으로 최종 설정만 정제하고 구조화 장부도 다시 만든다.
+        if not lab.get("canon_master", "").strip():
+            st.warning("2.6 형식의 잠금 데이터입니다. 집필 전에 검증 이력을 제거한 최종 Canon으로 정제하세요.")
+            if st.button("✨ 기존 Canon 정제 + Story Bible 재생성", type="primary", use_container_width=True):
+                if not api_key:
+                    st.error("OpenAI API Key가 필요합니다.")
+                else:
+                    source = (lab.get("raw_locked_candidate") or lab.get("locked_bible") or lab.get("revised") or "").strip()
+                    with st.status("기존 잠금본 Canon 정제 중", expanded=True) as status:
+                        try:
+                            lab["raw_locked_candidate"] = source
+                            canon = refine_canon_master(api_key, model, data, source)
+                            lab["canon_master"] = canon
+                            lab["canon_refined_at"] = datetime.now().isoformat(timespec="seconds")
+                            lab["locked_bible"] = canon
+                            bible = build_bible_from_locked_concept(api_key, model, data)
+                            apply_bible_to_project(data, bible)
+                            save_data(data)
+                            status.update(label="Canon 정제 + Story Bible 재생성 완료", state="complete")
+                            st.rerun()
+                        except Exception as e:
+                            status.update(label="Canon 정제 실패", state="error")
+                            st.error(f"Canon 정제 오류: {e}")
+        else:
+            st.success(f"✨ Canon 정제 완료 · {lab.get('canon_refined_at','')}")
+
         st.info(f"자동 구축됨: 인물 {len(data['characters'])}명 · 관계 {len(data['relationships'])}개 · 연표 {len(data['timeline'])}개 · 떡밥 {len(data['foreshadowing'])}개 · 초기 정보 {len(data['knowledge'])}개")
-        with st.expander("잠금된 바이블 보기"):
-            st.write(lab.get("locked_bible", ""))
+        with st.expander("✨ 정제된 최종 Canon 보기"):
+            st.write(lab.get("canon_master") or lab.get("locked_bible", ""))
+        with st.expander("🧾 검증·보완 이력 보기"):
+            st.caption("이 영역은 작업 기록이며 이후 집필의 Canon 사실로 사용하지 않습니다.")
+            if lab.get("reaudit"):
+                st.write(lab.get("reaudit"))
+            for h in lab.get("refine_history", []):
+                st.write(f"**{h.get('round')}차 보완 · {h.get('at','')}**")
+                st.write(h.get("after", ""))
 
 
 # 0-2. 작가실 규칙
@@ -1116,7 +1232,7 @@ with tabs[7]:
 with tabs[8]:
     st.subheader("🗺️ 전체 시즌 설계")
     if data.get("concept_lab", {}).get("locked", False):
-        st.success("확정 Story Bible을 사용합니다. 여기서부터도 별도 복붙 없이 진행됩니다.")
+        st.success("정제된 최종 Canon 기반 Story Bible을 사용합니다. 검증·수정 이력은 집필 기준에서 제외됩니다.")
     total = int(data["meta"].get("episode_count", 10) or 10)
     st.caption(
         f"먼저 {total}부작 전체의 사건·반전·떡밥·클리프행어를 고정합니다. "
@@ -1513,4 +1629,4 @@ with tabs[10]:
             )
             st.write(result)
 
-st.caption("AI 드라마 작가실 2.6 · 국소 보완안도 다시 승인·독립 재검증한 뒤 Canon으로 잠급니다. · project.json 저장")
+st.caption("AI 드라마 작가실 2.7 · 검증 이력과 최종 Canon을 분리하고, 정제된 Canon만 Story Bible과 집필 기준으로 사용합니다. · project.json 저장")
