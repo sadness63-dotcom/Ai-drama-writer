@@ -149,8 +149,24 @@ def slugify(text):
     return text[:80] or "project"
 
 
+def sanitize_api_key(api_key):
+    """2.9.3: iPad/모바일 붙여넣기에서 섞일 수 있는 한글·스마트 따옴표·제로폭 문자를 제거/검증한다."""
+    key = str(api_key or "").strip()
+    key = key.replace("\u200b", "").replace("\u200c", "").replace("\u200d", "").replace("\ufeff", "")
+    # OpenAI SDK는 API 키를 HTTP 헤더에 넣으므로 비-ASCII 문자가 섞이면 ascii codec 오류가 난다.
+    try:
+        key.encode("ascii")
+    except UnicodeEncodeError:
+        raise ValueError("API Key에 한글/특수문자가 섞여 있습니다. OpenAI에서 발급받은 키를 다시 복사해 붙여넣어 주세요.")
+    if not key:
+        raise ValueError("OpenAI API Key가 비어 있습니다.")
+    if not key.startswith("sk-"):
+        raise ValueError("OpenAI API Key 형식이 올바르지 않습니다. sk- 로 시작하는 Secret Key를 입력해 주세요.")
+    return key
+
+
 def get_client(api_key):
-    return OpenAI(api_key=api_key)
+    return OpenAI(api_key=sanitize_api_key(api_key))
 
 
 def call_model(api_key, model, instructions, prompt):
@@ -170,7 +186,7 @@ def call_model(api_key, model, instructions, prompt):
             quota_error = any(x in msg for x in ("insufficient_quota", "billing", "quota", "credit"))
             if quota_error:
                 st.error("OpenAI API 사용 한도 또는 결제/크레딧 문제로 요청이 중단되었습니다. API 결제 상태와 사용 한도를 확인한 뒤 다시 실행해 주세요.")
-                st.info("2.9.2는 이 경우 추가 재시도를 하지 않아 불필요한 API 호출을 막습니다.")
+                st.info("2.9.3은 이 경우 추가 재시도를 하지 않아 불필요한 API 호출을 막습니다.")
                 st.stop()
             if attempt < len(waits):
                 wait = waits[attempt]
@@ -766,7 +782,7 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🎬 AI 드라마 작가실 2.9.2")
+st.title("🎬 AI 드라마 작가실 2.9.3")
 st.caption("한 줄 아이디어 → 재미/현실성 조절 → 레드팀 → 사용자 승인 → Canon 잠금 → 시즌/대본")
 
 if "data" not in st.session_state:
@@ -2340,4 +2356,4 @@ with tabs[10]:
             )
             st.write(result)
 
-st.caption("AI 드라마 작가실 2.9.2 · 작품 설정→AI 인물 제안→사용자 승인 + Canon 잠금 + 회차 최종 게이트 · project.json 저장")
+st.caption("AI 드라마 작가실 2.9.3 · 한글 API Key 입력 방어 + 작품 설정→AI 인물 제안→사용자 승인 + Canon 잠금 + 회차 최종 게이트 · project.json 저장")
