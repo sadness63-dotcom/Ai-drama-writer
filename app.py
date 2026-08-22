@@ -29,6 +29,13 @@ DEFAULT_DATA = {
     "knowledge": [],
     "episodes": [],
     "notes": [],
+    "character_lab": {
+        "confirmed": False,
+        "confirmed_at": "",
+        "generated_at": "",
+        "source_signature": "",
+        "confirmed_snapshot": []
+    },
     "creative_controls": {"makjang": 8, "twist": 8, "realism": 7, "legal_accuracy": 6},
     "writer_rules": [
         {"id":"RULE-001","text":"현실의 법률·제도가 핵심 장치라면 확정 전에 실제 성립 가능성을 검증한다."},
@@ -89,6 +96,12 @@ def migrate_data(raw):
                 "season_plan", "knowledge", "episodes", "notes", "writer_rules"]:
         if not isinstance(base.get(key), list):
             base[key] = []
+    if not isinstance(base.get("character_lab"), dict):
+        base["character_lab"] = clone_default()["character_lab"]
+    for k, v in clone_default()["character_lab"].items():
+        base["character_lab"].setdefault(k, v)
+    if not isinstance(base.get("character_lab", {}).get("confirmed_snapshot"), list):
+        base["character_lab"]["confirmed_snapshot"] = []
     if not isinstance(base.get("creative_controls"), dict):
         base["creative_controls"] = clone_default()["creative_controls"]
     for k, v in clone_default()["creative_controls"].items():
@@ -157,7 +170,7 @@ def call_model(api_key, model, instructions, prompt):
             quota_error = any(x in msg for x in ("insufficient_quota", "billing", "quota", "credit"))
             if quota_error:
                 st.error("OpenAI API 사용 한도 또는 결제/크레딧 문제로 요청이 중단되었습니다. API 결제 상태와 사용 한도를 확인한 뒤 다시 실행해 주세요.")
-                st.info("2.9.1은 이 경우 추가 재시도를 하지 않아 불필요한 API 호출을 막습니다.")
+                st.info("2.9.2는 이 경우 추가 재시도를 하지 않아 불필요한 API 호출을 막습니다.")
                 st.stop()
             if attempt < len(waits):
                 wait = waits[attempt]
@@ -605,6 +618,123 @@ def build_audit_digest(api_key, model, audit_text):
     return obj if isinstance(obj, dict) else {}
 
 
+
+def character_source_signature(data):
+    meta = data.get("meta", {})
+    payload = {
+        "title": meta.get("title", ""),
+        "genre": meta.get("genre", ""),
+        "format": meta.get("format", ""),
+        "tone": meta.get("tone", ""),
+        "premise": meta.get("premise", ""),
+        "final_truth": meta.get("final_truth", ""),
+        "episode_count": meta.get("episode_count", 10),
+    }
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+
+def normalize_character_proposal(obj):
+    if isinstance(obj, dict):
+        chars = obj.get("characters", [])
+    else:
+        chars = obj
+    if not isinstance(chars, list):
+        raise ValueError("인물 제안이 배열 형식이 아닙니다.")
+
+    normalized = []
+    used = set()
+    for raw in chars[:8]:
+        if not isinstance(raw, dict):
+            continue
+        name = str(raw.get("name", "")).strip()
+        if not name or name in used:
+            continue
+        used.add(name)
+
+        try:
+            age = int(raw.get("age", 30) or 30)
+        except Exception:
+            age = 30
+        age = max(1, min(100, age))
+
+        by = raw.get("birth_year")
+        try:
+            birth_year = int(by) if by not in (None, "", 0, "0") else None
+        except Exception:
+            birth_year = None
+
+        normalized.append({
+            "name": name,
+            "age": age,
+            "birth_year": birth_year,
+            "role": str(raw.get("role", "")).strip(),
+            "biological_mother": str(raw.get("biological_mother", "") or "").strip(),
+            "biological_father": str(raw.get("biological_father", "") or "").strip(),
+            "raised_by": str(raw.get("raised_by", "") or "").strip(),
+            "secret": str(raw.get("secret", "") or "").strip(),
+            "desire": str(raw.get("desire", "") or "").strip(),
+        })
+
+    if len(normalized) < 2:
+        raise ValueError("사용 가능한 인물 제안이 너무 적습니다.")
+    return normalized
+
+
+def generate_character_proposal(api_key, model, data):
+    meta = data.get("meta", {})
+    premise = str(meta.get("premise", "")).strip()
+    final_truth = str(meta.get("final_truth", "")).strip()
+    if not premise:
+        raise ValueError("먼저 작품 탭의 '기본 설정 / 로그라인'을 입력해 주세요.")
+
+    raw = call_model(
+        api_key,
+        model,
+        """당신은 한국 숏폼 드라마의 캐릭터 설계 담당 작가다.
+사용자가 입력한 작품 설정과 작가만 아는 최종 진실을 절대 변경하지 않는다.
+새 반전, 새 친자관계, 새 사망, 새 범인을 멋대로 추가하지 않는다.
+인물은 이야기의 핵심 갈등을 수행하는 데 필요한 최소 인원만 제안한다.
+각 인물의 욕망과 비밀은 서로 충돌 가능해야 하지만, 입력된 최종 진실과 모순되면 안 된다.
+부모가 작품상 중요 인물이 아니면 biological_mother / biological_father는 빈 문자열로 둔다.
+현재 나이는 반드시 1~100 사이 정수로 제시한다.
+응답은 설명 없이 JSON만 반환한다.""",
+        f"""# 작품 입력
+제목: {meta.get('title','')}
+장르: {meta.get('genre','')}
+형식: {meta.get('format','')}
+톤/문체: {meta.get('tone','')}
+총 회차: {meta.get('episode_count',10)}
+
+기본 설정 / 로그라인:
+{premise}
+
+작가만 아는 최종 진실:
+{final_truth or "(입력되지 않음)"}
+
+# 요청
+주요 인물 4~7명을 제안하라.
+사용자가 직접 수정한 뒤 승인할 예정이므로 아직 Canon 확정이라고 가정하지 마라.
+
+다음 형식으로 JSON 객체만 반환:
+{{
+  "characters": [
+    {{
+      "name": "이름",
+      "age": 43,
+      "birth_year": null,
+      "role": "이야기에서의 역할/직업/지위",
+      "biological_mother": "",
+      "biological_father": "",
+      "raised_by": "",
+      "secret": "이 인물이 숨기는 사실. 없으면 빈 문자열",
+      "desire": "이 인물이 지금 가장 원하는 것"
+    }}
+  ]
+}}"""
+    )
+    return normalize_character_proposal(extract_json(raw))
+
+
 def render_audit_digest(digest):
     if not isinstance(digest, dict) or not digest:
         return
@@ -636,7 +766,7 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🎬 AI 드라마 작가실 2.9.1")
+st.title("🎬 AI 드라마 작가실 2.9.2")
 st.caption("한 줄 아이디어 → 재미/현실성 조절 → 레드팀 → 사용자 승인 → Canon 잠금 → 시즌/대본")
 
 if "data" not in st.session_state:
@@ -1162,8 +1292,53 @@ with tabs[2]:
 
 # 2. 인물
 with tabs[3]:
-    st.subheader("인물 카드 · 자동 생성 결과")
-    with st.expander("➕ 인물 추가", expanded=not data["characters"]):
+    st.subheader("인물 카드 · AI 제안 → 사용자 승인")
+    st.caption("작품 탭의 로그라인·최종 진실을 바탕으로 AI가 인물 초안을 제안합니다. 사용자가 확정하기 전에는 승인된 인물 Canon으로 취급하지 않습니다.")
+
+    char_lab = data.setdefault("character_lab", clone_default()["character_lab"])
+    current_sig = character_source_signature(data)
+    confirmed = bool(char_lab.get("confirmed"))
+
+    if confirmed and char_lab.get("source_signature") != current_sig:
+        st.warning("⚠️ 인물 확정 후 작품 기본 설정이 변경되었습니다. 현재 인물은 유지되지만 재검토가 필요합니다.")
+
+    cgen1, cgen2 = st.columns(2)
+    gen_label = "🤖 작품 설정으로 인물 자동 생성" if not data["characters"] else "🔄 인물 제안 다시 생성"
+    if cgen1.button(gen_label, use_container_width=True):
+        if not api_key:
+            st.error("왼쪽에 OpenAI API Key를 입력하세요.")
+        else:
+            try:
+                with st.status("인물 제안 생성 중...", expanded=True) as status:
+                    status.write("작품의 로그라인·최종 진실·톤을 읽고 핵심 인물을 설계합니다.")
+                    proposal = generate_character_proposal(api_key, model, data)
+                    data["characters"] = proposal
+                    char_lab["confirmed"] = False
+                    char_lab["confirmed_at"] = ""
+                    char_lab["confirmed_snapshot"] = []
+                    char_lab["generated_at"] = datetime.now().isoformat(timespec="seconds")
+                    char_lab["source_signature"] = current_sig
+                    save_data(data)
+                    status.update(label=f"인물 {len(proposal)}명 제안 완료", state="complete")
+                st.rerun()
+            except Exception as e:
+                st.error(f"인물 자동 생성 오류: {e}")
+
+    if cgen2.button("🧹 인물 제안 비우기", use_container_width=True, disabled=not bool(data["characters"])):
+        data["characters"] = []
+        char_lab["confirmed"] = False
+        char_lab["confirmed_at"] = ""
+        char_lab["confirmed_snapshot"] = []
+        save_data(data)
+        st.rerun()
+
+    if data["characters"]:
+        if confirmed:
+            st.success(f"🔒 사용자 승인 인물 · {char_lab.get('confirmed_at','')}")
+        else:
+            st.info("📝 현재 인물은 AI 제안/수정 단계입니다. 아래 카드를 검토한 뒤 '인물 확정'을 눌러 주세요.")
+
+    with st.expander("➕ 인물 직접 추가", expanded=False):
         with st.form("add_character", clear_on_submit=True):
             c1, c2, c3 = st.columns(3)
             name = c1.text_input("이름")
@@ -1211,8 +1386,32 @@ with tabs[3]:
             c["desire"] = st.text_area("욕망/목표", c.get("desire", ""), key=f"desire_{i}")
             if st.button("이 인물 삭제", key=f"delc_{i}"):
                 data["characters"].pop(i)
+                char_lab["confirmed"] = False
+                char_lab["confirmed_at"] = ""
+                char_lab["confirmed_snapshot"] = []
                 save_data(data)
                 st.rerun()
+
+    if data["characters"]:
+        st.divider()
+        if not confirmed:
+            if st.button("🔒 이 인물 구성 확정", type="primary", use_container_width=True):
+                char_lab["confirmed"] = True
+                char_lab["confirmed_at"] = datetime.now().isoformat(timespec="seconds")
+                char_lab["source_signature"] = character_source_signature(data)
+                char_lab["confirmed_snapshot"] = json.loads(json.dumps(data["characters"], ensure_ascii=False))
+                save_data(data)
+                st.success("인물 구성이 사용자 승인되었습니다. 다음은 관계 설계로 진행할 수 있습니다.")
+                st.rerun()
+        else:
+            c_unlock, c_keep = st.columns([1, 2])
+            if c_unlock.button("🔓 인물 확정 해제", use_container_width=True):
+                char_lab["confirmed"] = False
+                char_lab["confirmed_at"] = ""
+                save_data(data)
+                st.rerun()
+            c_keep.caption("수정이 필요하면 확정을 해제한 뒤 편집하고 다시 확정하세요.")
+
     save_data(data)
 
 # 3. 관계
@@ -2141,4 +2340,4 @@ with tabs[10]:
             )
             st.write(result)
 
-st.caption("AI 드라마 작가실 2.9.1 · Canon 잠금 + 회차 최종 게이트 + 다음 화 상태 승계 · project.json 저장")
+st.caption("AI 드라마 작가실 2.9.2 · 작품 설정→AI 인물 제안→사용자 승인 + Canon 잠금 + 회차 최종 게이트 · project.json 저장")
